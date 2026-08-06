@@ -25,8 +25,11 @@
 
 set -euo pipefail
 
+# Absolute path on purpose: Slurm copies the submitted script to
+# /var/spool/slurmd/job<N>/slurm_script, so $BASH_SOURCE points there, not at the repo,
+# and a relative source would fail at runtime.
 # shellcheck disable=SC1091
-source "$(dirname "${BASH_SOURCE[0]}")/_salm_env.sh"
+source /scratch/l/lovenya/SALM-model/submission_scripts/_salm_env.sh
 
 SMOKE="${SMOKE:-0}"
 RUN_ID="${RUN_ID:-$(TZ=America/Toronto date +%Y%m%d_%H%M)}"
