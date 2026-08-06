@@ -195,9 +195,43 @@ rows in `sinfo` are h200 nodes). A GPU allocation reserves the whole node, so
 CPU/RAM asks are cgroup limits inside it -- under-asking only starves our own
 dataloader workers. Current request: 48 CPUs, 480G, 4 GPUs, 3 h.
 
-Account: standing target is 60% `aip-csubakan` / 40% `aip-ravanelm`. The first
-run went to `aip-ravanelm` because FairShare there was ~3x better (0.123 vs
-0.037); rebalance on later, less time-critical runs.
+Account: standing target is 60% `aip-csubakan` / 40% `aip-ravanelm`.
+
+**The first runs deliberately went to `aip-ravanelm`, and the balance is owed
+back to `aip-csubakan`.** Measured with `sbatch --test-only` at 08:04 on
+2026-08-06, for the same 1 h whole-node job:
+
+```text
+aip-ravanelm -> predicted start 08:48  (44 min wait)
+aip-csubakan -> predicted start 11:27  (3h 23m wait)
+```
+
+FairShare (0.123 vs 0.037) dominated, so csubakan would have cost ~2h40m and
+missed the deadline. **Send the next non-urgent runs to `aip-csubakan`** to
+rebalance. Always check with `sbatch --test-only` on both accounts before
+assuming either is faster -- the gap moves.
+
+Useful pattern: `sbatch --test-only --account=<acct> <script>` predicts the start
+time without queueing anything.
+
+## Job structure
+
+Split into two chained jobs rather than one 3 h job:
+
+```text
+stage 1 (1 h): Rung 0 gate + VAE latent precompute
+stage 2 (2 h): Rung 3 training + generation   [--dependency=afterok:stage1]
+```
+
+The reason is **failure isolation, not queue time** -- measured backfill gain was
+only ~10 min (08:48 vs 08:58). What it buys: a gate failure costs a 1 h
+allocation instead of 3 h, and the go/no-go signal on the mel/VAE stack arrives
+sooner. Submitting stage 2 immediately with `afterok` lets it accrue priority
+while stage 1 runs, so finish time is about the same as the monolithic job.
+
+The stages are decoupled through the features directory -- stage 1 records the
+selected mel `norm_mode` in `meta.json`, stage 2 reads it -- so there is no
+run-ID coordination and stage 2 can be rerun independently.
 
 ## Open / TBD
 
