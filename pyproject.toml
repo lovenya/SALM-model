@@ -1,0 +1,23 @@
+[project]
+name = "salm-model"
+version = "0.1.0"
+description = "AudioLDM-based speech <-> environmental audio generation (SpeechAudio LM)"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchaudio",
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "soundfile",
+    "librosa",
+    "numpy",
+    "pyyaml",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

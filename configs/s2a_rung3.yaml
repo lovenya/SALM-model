@@ -1,0 +1,55 @@
+# Rung 3: AudioLDM diffusion recipe for S2A (speech -> ambient audio).
+#
+# Frozen: Whisper-large-v3 encoder, mel VAE, HiFi-GAN vocoder.
+# Trainable: mapper + AudioLDM U-Net.
+#
+# Launch:
+#   torchrun --nproc_per_node=4 -m salm.train_ldm --config configs/s2a_rung3.yaml
+
+direction: s2a
+train_split: train
+val_split: val
+speech_seconds: 16.0          # covers the observed TTAS max (~16.1 s) without truncation
+
+encoder: whisper
+mapper_hidden_dim: 1024
+mapper_layers: 2
+mapper_dropout: 0.1
+
+# 16 per GPU x 4 GPUs = effective 64. AudioLDM-S latents are small, so this fits
+# comfortably on H100s and leaves room for the frozen Whisper encoder.
+batch_size: 16
+# 8 workers x 4 ranks = 32 of the node's 48 CPUs. Speech loading + 24k->16k resampling
+# is CPU-bound, so this is where the spare cores actually help.
+num_workers: 8
+
+# 15k samples / 64 per step is ~235 steps per epoch, so epochs are cheap. 20 is a
+# starting point -- watch val loss and expect overfitting to appear well before the
+# end at this data scale.
+epochs: 20
+
+# The U-Net is pretrained and the mapper is not, so they get very different rates.
+# Too high an LR on the U-Net erases AudioLDM's prior, which is the main thing we
+# are borrowing.
+lr_mapper: 1.0e-4
+lr_unet: 1.0e-5
+weight_decay: 1.0e-2
+warmup_steps: 300
+grad_clip: 1.0
+
+# AudioLDM trains its unconditional branch by dropping the condition; needed for
+# classifier-free guidance at sampling time.
+cfg_dropout_prob: 0.1
+
+freeze_unet: false
+seed: 1337
+
+amp_dtype: bf16               # H100: no loss scaling needed
+log_every: 25
+val_every_epochs: 1
+save_every_epochs: 5
+
+run_name: s2a_rung3
+# Internal deadline, set below the Slurm walltime so the job can validate, checkpoint,
+# and write its report instead of being hard-killed mid-write.
+max_train_minutes: 100

@@ -1,0 +1,39 @@
+{
+  "_comment": "Workload -> environment map for SALM-model. Mirrors the SpeechAudioLM convention: one env per dependency stack, named <purpose>-<backbone>-<python>. Envs live on scratch to keep multi-GB torch installs off the home quota.",
+  "environments": {
+    "salm-train-audioldm": {
+      "path": "/scratch/l/lovenya/salm_migration_clean/.venvs/salm-model/.venv-salm-train-audioldm-py312",
+      "python": "3.12.4",
+      "modules": [
+        "StdEnv/2023",
+        "gcc",
+        "cuda/12.6",
+        "python/3.12.4",
+        "scipy-stack"
+      ],
+      "setup_script": "scripts/setup_env.sh",
+      "purpose": "AudioLDM S2A training, precompute, and generation",
+      "key_packages": [
+        "torch",
+        "torchaudio",
+        "diffusers",
+        "transformers",
+        "accelerate",
+        "soundfile",
+        "librosa"
+      ]
+    }
+  },
+  "external_environments": {
+    "_comment": "Owned by the SpeechAudioLM repo. Reused read-only for metrics after training runs; do not rebuild from here.",
+    "eval-audioldm-fad-is": {
+      "path": "/scratch/l/lovenya/salm_migration_clean/.venvs/metrics/.venv-eval-audioldm-eval",
+      "purpose": "FAD + Inception Score over generated audio directories",
+      "runtime_home": "/scratch/l/lovenya/salm_migration_clean/cache/metrics/runtime_home"
+    },
+    "eval-metrics-shared": {
+      "path": "/home/l/lovenya/.venvs/speechaudiolm/.venv-eval-metrics-shared-py312",
+      "purpose": "shared metric stack (asr_wer, dwer, utmos, dnsmos, clapsim, ...)"
+    }
+  }
+}
