@@ -137,7 +137,7 @@ GEN_R0=$!
 GEN_FAIL=0
 wait "$GEN_S2A" || GEN_FAIL=1
 wait "$GEN_R0" || GEN_FAIL=1
-tail -6 "$LOG_DIR/04_gen_s2a.log" "$LOG_DIR/04_gen_rung0.log"
+tail -n 6 "$LOG_DIR/04_gen_s2a.log" "$LOG_DIR/04_gen_rung0.log"
 
 # ===================================================================== report
 echo

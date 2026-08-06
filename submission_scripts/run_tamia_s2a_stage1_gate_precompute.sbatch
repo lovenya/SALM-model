@@ -100,7 +100,7 @@ PRE_VAL=$!
 PRE_FAIL=0
 wait "$PRE_TRAIN" || PRE_FAIL=1
 wait "$PRE_VAL" || PRE_FAIL=1
-tail -6 "$LOG_DIR/02_precompute_train.log" "$LOG_DIR/02_precompute_val.log"
+tail -n 6 "$LOG_DIR/02_precompute_train.log" "$LOG_DIR/02_precompute_val.log"
 if [[ "$PRE_FAIL" != "0" ]]; then
     echo "ERROR: precompute failed." >&2
     exit 1

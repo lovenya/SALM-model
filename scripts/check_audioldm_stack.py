@@ -154,59 +154,72 @@ def main() -> int:
     sf.write(out_dir / "00_original.wav", wav, AUDIOLDM_SR)
 
     # ------------------------------------- 3. mel correctness via vocoder only
-    log("\n[3] Mel round-trip (wav -> mel -> vocoder -> wav), isolating mel from VAE")
-    mel_results = {}
-    for norm_mode in ("none", "audiomae"):
-        extractor = MelExtractor(MelConfig(norm_mode=norm_mode), device=args.device)
-        mel = extractor(wav)                                    # (frames, mels)
-
-        with torch.no_grad():
-            mel_for_vocoder = extractor.denormalize(mel).unsqueeze(0)
-            rec = pipe.vocoder(mel_for_vocoder).cpu().numpy().squeeze()
-
-        sf.write(out_dir / f"01_melroundtrip_{norm_mode}.wav", rec, AUDIOLDM_SR)
-
-        ref_extractor = MelExtractor(MelConfig(norm_mode="none"), device=args.device)
-        scores = score_reconstruction(
-            ref_extractor(wav).cpu(), ref_extractor(rec).cpu()
-        )
-        scores["rec_rms"] = float(np.sqrt(np.mean(rec**2)))
-        mel_results[norm_mode] = scores
-        log(f"    norm_mode={norm_mode:9s} corr={scores['mel_corr']:+.4f} "
-            f"mse={scores['mel_mse']:.4f} rms={scores['rec_rms']:.5f}")
-
-    best_norm = max(mel_results, key=lambda k: mel_results[k]["mel_corr"])
-    report["mel_roundtrip"] = mel_results
-    report["best_norm_mode"] = best_norm
-    log(f"    => best norm_mode: {best_norm} (corr {mel_results[best_norm]['mel_corr']:+.4f})")
-    if mel_results[best_norm]["mel_corr"] < 0.8:
-        log("    => WARNING: weak round-trip. Mel settings are probably still wrong;")
-        log("       listen to 01_melroundtrip_*.wav before trusting any training run.")
-
-    # --------------------------------------------------- 4a. VAE round-trip
-    log("\n[4a] VAE round-trip (mel -> encode -> decode -> vocoder)")
-    extractor = MelExtractor(MelConfig(norm_mode=best_norm), device=args.device)
-    mel = extractor(wav)
+    # This tests ONE thing: is the mel itself right (filterbank, hop, orientation, scale)?
+    # The vocoder is the ground truth because it was trained to invert exactly AudioLDM's
+    # mel. Deliberately uses raw log-mel and does NOT vary norm_mode: an earlier version
+    # looped over norm modes here but denormalized before vocoding, so both branches fed
+    # the vocoder the identical tensor and the "comparison" was vacuous.
+    log("\n[3] Mel round-trip (wav -> raw log-mel -> vocoder -> wav), isolating mel from VAE")
+    raw_extractor = MelExtractor(MelConfig(norm_mode="none"), device=args.device)
+    mel_raw = raw_extractor(wav)
 
     with torch.no_grad():
-        # VAE expects (B, 1, frames, mels)
-        mel_in = mel.unsqueeze(0).unsqueeze(0)
-        posterior = pipe.vae.encode(mel_in).latent_dist
-        latent = posterior.sample() * pipe.vae.config.scaling_factor
-        log(f"     latent shape: {tuple(latent.shape)}  scaling_factor: {pipe.vae.config.scaling_factor}")
+        rec = pipe.vocoder(mel_raw.unsqueeze(0)).cpu().numpy().squeeze()
+    sf.write(out_dir / "01_melroundtrip.wav", rec, AUDIOLDM_SR)
 
-        mel_dec = pipe.vae.decode(latent / pipe.vae.config.scaling_factor).sample
-        mel_dec = mel_dec.squeeze(1)                             # (B, frames, mels)
-        rec_vae = pipe.vocoder(extractor.denormalize(mel_dec)).cpu().numpy().squeeze()
+    mel_scores = score_reconstruction(raw_extractor(wav).cpu(), raw_extractor(rec).cpu())
+    mel_scores["rec_rms"] = float(np.sqrt(np.mean(rec**2)))
+    report["mel_roundtrip"] = mel_scores
+    log(f"    corr={mel_scores['mel_corr']:+.4f} mse={mel_scores['mel_mse']:.4f} "
+        f"rms={mel_scores['rec_rms']:.5f}")
+    if mel_scores["mel_corr"] < 0.8:
+        log("    => WARNING: weak round-trip. Mel settings are wrong; listen to")
+        log("       01_melroundtrip.wav before trusting any training run.")
 
-    sf.write(out_dir / "02_vae_roundtrip.wav", rec_vae, AUDIOLDM_SR)
-    ref_extractor = MelExtractor(MelConfig(norm_mode="none"), device=args.device)
-    vae_scores = score_reconstruction(ref_extractor(wav).cpu(), ref_extractor(rec_vae).cpu())
-    vae_scores["rec_rms"] = float(np.sqrt(np.mean(rec_vae**2)))
-    report["latent_shape"] = list(latent.shape)
-    report["vae_roundtrip"] = vae_scores
-    log(f"     corr={vae_scores['mel_corr']:+.4f} mse={vae_scores['mel_mse']:.4f} "
-        f"rms={vae_scores['rec_rms']:.5f}")
+    # --------------------------------------------------- 4a. VAE round-trip
+    # THIS is the test that discriminates between normalizations, because the VAE is
+    # scale-sensitive. Scoring happens in mel space (input vs decoded, same normalization),
+    # so the vocoder cannot mask a mismatch.
+    #
+    # Expectation: "none" should win. The pipeline runs vae.decode(...) -> vocoder(mel)
+    # with no rescaling between them, so the VAE's output space IS the vocoder's input
+    # space, and section [3] shows the vocoder wants raw log-mel.
+    log("\n[4a] VAE round-trip per norm_mode (mel -> encode -> decode), scored in mel space")
+    sf_scale = float(pipe.vae.config.scaling_factor)
+    vae_results = {}
+
+    for norm_mode in ("none", "audiomae"):
+        extractor = MelExtractor(MelConfig(norm_mode=norm_mode), device=args.device)
+        mel = extractor(wav)
+
+        with torch.no_grad():
+            mel_in = mel.unsqueeze(0).unsqueeze(0)          # VAE wants (B, 1, frames, mels)
+            posterior = pipe.vae.encode(mel_in).latent_dist
+            latent = posterior.sample() * sf_scale
+            mel_dec = pipe.vae.decode(latent / sf_scale).sample.squeeze(1)
+
+            rec_vae = pipe.vocoder(extractor.denormalize(mel_dec)).cpu().numpy().squeeze()
+
+        sf.write(out_dir / f"02_vae_roundtrip_{norm_mode}.wav", rec_vae, AUDIOLDM_SR)
+
+        scores = score_reconstruction(mel.cpu(), mel_dec.squeeze(0).cpu())
+        scores["rec_rms"] = float(np.sqrt(np.mean(rec_vae**2)))
+        scores["latent_shape"] = list(latent.shape)
+        vae_results[norm_mode] = scores
+        log(f"     norm_mode={norm_mode:9s} mel-space corr={scores['mel_corr']:+.4f} "
+            f"mse={scores['mel_mse']:.4f} audio_rms={scores['rec_rms']:.5f}")
+
+    best_norm = max(vae_results, key=lambda k: vae_results[k]["mel_corr"])
+    report["vae_roundtrip_by_norm"] = vae_results
+    report["vae_roundtrip"] = vae_results[best_norm]
+    report["best_norm_mode"] = best_norm
+    report["latent_shape"] = vae_results[best_norm]["latent_shape"]
+    log(f"     => best norm_mode: {best_norm} "
+        f"(VAE corr {vae_results[best_norm]['mel_corr']:+.4f}, "
+        f"scaling_factor {sf_scale:.4f})")
+    if vae_results[best_norm]["mel_corr"] < 0.8:
+        log("     => WARNING: even the best normalization round-trips poorly through the")
+        log("        VAE. Do not trust precomputed latents; inspect 02_vae_roundtrip_*.wav.")
 
     # ------------------------------------------- 4b. text-conditioned sampling
     if not args.skip_generation:

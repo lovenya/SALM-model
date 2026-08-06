@@ -73,7 +73,7 @@ read -r BEST_NORM MEL_CORR VAE_CORR <<< "$(python - <<PY
 import json, pathlib
 d = json.loads(pathlib.Path("$GATE_DIR/report.json").read_text())
 best = d.get("best_norm_mode", "none")
-mel = d.get("mel_roundtrip", {}).get(best, {}).get("mel_corr", float("nan"))
+mel = d.get("mel_roundtrip", {}).get("mel_corr", float("nan"))
 vae = d.get("vae_roundtrip", {}).get("mel_corr", float("nan"))
 print(best, f"{mel:.4f}", f"{vae:.4f}")
 PY
@@ -81,18 +81,25 @@ PY
 echo
 echo ">>> GATE: norm_mode=$BEST_NORM mel_corr=$MEL_CORR vae_corr=$VAE_CORR"
 
-# A wrong mel scale makes the VAE encode out-of-distribution input. Training would still
-# run and the loss would still fall -- toward a meaningless target. So stop here instead.
+# Gate on BOTH round-trips. The mel check alone is not sufficient: a previous run passed
+# mel_corr=0.9895 and still produced vae_corr=-0.1520, i.e. the VAE was being handed
+# mis-scaled input and its latents were meaningless. Training on those latents would run
+# happily and the loss would fall -- toward a target with no signal in it.
 python - <<PY
 import sys
-mel = float("$MEL_CORR")
+mel, vae = float("$MEL_CORR"), float("$VAE_CORR")
 if not (mel >= 0.80):
     sys.exit(
-        f"ABORT: mel round-trip correlation {mel:.4f} < 0.80. The mel does not match "
-        "AudioLDM's vocoder, so latents would be garbage. Listen to "
-        "$GATE_DIR/01_melroundtrip_*.wav and fix frontend.py."
+        f"ABORT: mel round-trip corr {mel:.4f} < 0.80. The mel does not match AudioLDM's "
+        "vocoder. Listen to $GATE_DIR/01_melroundtrip.wav and fix frontend.py."
     )
-print(f"mel round-trip OK ({mel:.4f})")
+if not (vae >= 0.80):
+    sys.exit(
+        f"ABORT: VAE round-trip corr {vae:.4f} < 0.80 (mel was fine at {mel:.4f}). The VAE "
+        "cannot reconstruct our mel, so precomputed latents would carry no usable signal. "
+        "Inspect $GATE_DIR/02_vae_roundtrip_*.wav and the per-norm scores in report.json."
+    )
+print(f"gate OK -- mel {mel:.4f}, VAE {vae:.4f}")
 PY
 
 # ========================================================= 2. Precompute latents
@@ -111,7 +118,7 @@ PRE_VAL=$!
 PRE_FAIL=0
 wait "$PRE_TRAIN" || PRE_FAIL=1
 wait "$PRE_VAL" || PRE_FAIL=1
-tail -5 "$LOG_DIR/02_precompute_train.log" "$LOG_DIR/02_precompute_val.log"
+tail -n 5 "$LOG_DIR/02_precompute_train.log" "$LOG_DIR/02_precompute_val.log"
 [[ "$PRE_FAIL" != "0" ]] && { echo "ERROR: precompute failed." >&2; exit 1; }
 
 # ================================================================= 3. Training
@@ -156,7 +163,7 @@ GEN_R0=$!
 GEN_FAIL=0
 wait "$GEN_S2A" || GEN_FAIL=1
 wait "$GEN_R0" || GEN_FAIL=1
-tail -5 "$LOG_DIR/04_gen_s2a.log" "$LOG_DIR/04_gen_rung0.log"
+tail -n 5 "$LOG_DIR/04_gen_s2a.log" "$LOG_DIR/04_gen_rung0.log"
 
 # ====================================================================== report
 echo
@@ -172,8 +179,10 @@ if gate.exists():
     best = d.get("best_norm_mode")
     print("GATE (does AudioLDM's stack handle TTAS audio?)")
     print(f"  mel norm_mode selected : {best}")
-    print(f"  mel  round-trip corr   : {d['mel_roundtrip'][best]['mel_corr']:+.4f}")
-    print(f"  VAE  round-trip corr   : {d['vae_roundtrip']['mel_corr']:+.4f}")
+    print(f"  mel  round-trip corr   : {d['mel_roundtrip']['mel_corr']:+.4f}  (vocoder inverts our mel)")
+    print(f"  VAE  round-trip corr   : {d['vae_roundtrip']['mel_corr']:+.4f}  (VAE reconstructs our mel)")
+    for norm, s in d.get("vae_roundtrip_by_norm", {}).items():
+        print(f"     norm={norm:9s} VAE corr={s['mel_corr']:+.4f} audio_rms={s['rec_rms']:.5f}")
     print(f"  latent shape           : {d.get('latent_shape')}")
 
 h = run_dir / "history.json"

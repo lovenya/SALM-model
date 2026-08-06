@@ -90,7 +90,7 @@ echo
 echo "### tails ###"
 for label in "${LABELS[@]}"; do
     echo "--- $label ---"
-    tail -4 "$LOG_DIR/precompute_${label}.log"
+    tail -n 4 "$LOG_DIR/precompute_${label}.log"
 done
 
 echo
