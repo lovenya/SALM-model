@@ -327,9 +327,15 @@ def main() -> int:
         }
         if not cfg.freeze_unet:
             payload["unet"] = unet_module.state_dict()
+
+        # Write then rename. `last` is rewritten every epoch and the job can be killed by
+        # the internal deadline or by Slurm at any moment; saving in place would leave a
+        # truncated, unloadable file exactly when the partial checkpoint matters most.
         path = run_dir / f"checkpoint_{tag}.pt"
-        torch.save(payload, path)
-        log(f"    saved {path}")
+        tmp = path.with_suffix(".pt.tmp")
+        torch.save(payload, tmp)
+        os.replace(tmp, path)
+        log(f"    saved {path} (epoch {epoch}, step {step})")
 
     # ------------------------------------------------------------------ train
     deadline = time.time() + cfg.max_train_minutes * 60 if cfg.max_train_minutes > 0 else None
@@ -394,6 +400,14 @@ def main() -> int:
         if is_main():
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))
 
+        # Always refresh `last` so a current checkpoint exists on disk at all times.
+        # `best` only appears when val improves, so on a plateau it can go stale, and
+        # waiting for the loop to end would leave nothing recent if the job is killed.
+        # This is what makes "generate from whatever we have right now" reliable.
+        save_checkpoint("last", epoch, global_step, val_loss)
+
+        # Periodic immutable snapshots, kept separately from `last` so samples can be
+        # compared across training time.
         if (epoch + 1) % cfg.save_every_epochs == 0:
             save_checkpoint(f"ep{epoch:02d}", epoch, global_step, val_loss)
 
