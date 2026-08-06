@@ -27,7 +27,9 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import torch
@@ -51,6 +53,53 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def load_rows_prefetched(
+    rows: list, num_workers: int, prefetch: int
+) -> Iterator[tuple[int, object, np.ndarray | None, str | None]]:
+    """
+    Yield (row_index, row, waveform, error) in manifest order, loading ahead in threads.
+
+    Audio loading dominates this script -- decode from Lustre plus a 24k->16k resample per
+    file -- and it was originally serial, capping throughput at ~1.8 rows/s regardless of
+    whether the VAE ran on CPU or GPU. Threads are the right tool because soundfile and
+    librosa's resampler spend their time in C code with the GIL released.
+
+    Order is preserved so `latent_index` stays aligned with index.jsonl, and only
+    `prefetch` files are held in flight so memory stays bounded (each 10.24 s clip is
+    ~650 KB, so a few hundred in flight is cheap).
+    """
+    def load_one(item: tuple[int, object]):
+        row_i, row = item
+        try:
+            wav = load_waveform_mono_16k(
+                str(row.audio_path), target_seconds=AUDIOLDM_CLIP_SECONDS
+            )
+        except Exception as exc:
+            return row_i, row, None, f"read_error: {exc}"
+        if is_near_silent(wav):
+            return row_i, row, None, "near_silent_target"
+        return row_i, row, wav, None
+
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        pending: list = []
+        items = iter(list(enumerate(rows)))
+
+        for item in items:
+            pending.append(pool.submit(load_one, item))
+            if len(pending) >= prefetch:
+                break
+
+        while pending:
+            future = pending.pop(0)
+            try:
+                nxt = next(items)
+            except StopIteration:
+                pass
+            else:
+                pending.append(pool.submit(load_one, nxt))
+            yield future.result()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--direction", default="s2a", choices=["s2a", "a2s"])
@@ -66,6 +115,12 @@ def main() -> int:
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--limit", type=int, default=0, help="debug: only process N rows")
     ap.add_argument("--overwrite", action="store_true")
+    # Audio decode + resample is the bottleneck here, not the VAE, and it is I/O plus C
+    # code with the GIL released -- so threads genuinely help.
+    ap.add_argument("--load-workers", type=int, default=12,
+                    help="threads decoding/resampling audio ahead of the VAE")
+    ap.add_argument("--load-prefetch", type=int, default=96,
+                    help="max clips held in flight (bounds memory)")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir) / args.direction / args.split
@@ -136,19 +191,13 @@ def main() -> int:
             std_mm[written] = std[j]
             written += 1
 
-    for row_i, row in enumerate(rows):
-        try:
-            wav = load_waveform_mono_16k(
-                str(row.audio_path), target_seconds=AUDIOLDM_CLIP_SECONDS
-            )
-        except Exception as exc:  # unreadable file -> drop, do not fail the whole pass
-            dropped.append({"row_index": row_i, "sample_id": row.sample_id, "reason": f"read_error: {exc}"})
-            continue
-
-        if is_near_silent(wav):
-            dropped.append(
-                {"row_index": row_i, "sample_id": row.sample_id, "reason": "near_silent_target"}
-            )
+    for row_i, row, wav, error in load_rows_prefetched(
+        rows, num_workers=args.load_workers, prefetch=args.load_prefetch
+    ):
+        # Unreadable or degenerate rows are dropped, not fatal -- one bad file should not
+        # discard a 20-minute pass.
+        if error is not None:
+            dropped.append({"row_index": row_i, "sample_id": row.sample_id, "reason": error})
             continue
 
         # The latent slot for this row is `written + len(batch)`, assigned in flush().
