@@ -16,8 +16,14 @@ source "$VENV/bin/activate"
 
 export SALM_SCRATCH="${SALM_SCRATCH:-/scratch/l/lovenya/salm_migration_clean}"
 export HF_HOME="$SALM_SCRATCH/models/hf_cache"
-export HF_HUB_CACHE="$HF_HOME"
-export HUGGINGFACE_HUB_CACHE="$HF_HOME"
+# NOTE the "/hub" suffix. HF_HUB_CACHE defaults to $HF_HOME/hub, which is where
+# `hf download` actually writes. Setting it to $HF_HOME (as some older SpeechAudioLM
+# scripts do) points the resolver one level too high, and every repo-id load then fails
+# with a misleading "does not appear to have a file named config.json" even though the
+# cache is complete. Those older scripts get away with it because their downloads
+# predate this layout and sit directly in hf_cache/.
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
 export TRANSFORMERS_CACHE="$HF_HOME"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
