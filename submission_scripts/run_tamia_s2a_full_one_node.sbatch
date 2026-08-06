@@ -16,7 +16,11 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=480G
 #SBATCH --gpus=h100:4
-#SBATCH --time=02:00:00
+# 1 h, not 2 h. Measured work is ~34 min (gate 2 + precompute 2 + train 25 + generate 5),
+# and a 2 h ask was observed to fall outside the backfill window entirely: identical jobs
+# asking <=1:30 were predicted to start at 09:56 while the 2 h version sat at 11:36, a
+# 1h40m penalty for walltime we did not need. Raise TRAIN_MINUTES and this together.
+#SBATCH --time=01:00:00
 #SBATCH --output=/scratch/l/lovenya/salm_migration_clean/logs/slurm/%x-%j.out
 
 set -euo pipefail
