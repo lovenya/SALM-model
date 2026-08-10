@@ -239,6 +239,10 @@ def main() -> int:
                     "sample_id": row.sample_id,
                     "status": "success",
                     "mode": args.mode,
+                    # Relative to this manifest's directory. Absolute paths were used
+                    # originally and broke as soon as a run directory was moved, so the
+                    # portable form is authoritative and the absolute one is a convenience.
+                    "generated_file_rel": str(gen_path.relative_to(out_dir)),
                     "generated_file": str(gen_path),
                     "reference_audio_file": str(row.audio_path),
                     "reference_copy": str(ref_path) if ref_path else None,
