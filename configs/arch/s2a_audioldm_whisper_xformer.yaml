@@ -1,0 +1,8 @@
+# L2 -- 2-layer transformer over the frames + attention pooling (~32M params).
+#
+# This is the architecture of the first run (12 epochs, val 0.1905). Kept as the reference
+# point the other rungs are compared against.
+arch: s2a_audioldm_whisper_xformer
+mapper_hidden_dim: 1024
+mapper_layers: 2
+mapper_dropout: 0.1

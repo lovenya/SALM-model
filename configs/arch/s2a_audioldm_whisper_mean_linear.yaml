@@ -1,0 +1,6 @@
+# L0 -- the minimal baseline: masked mean-pool + one linear layer (~0.7M params).
+#
+# Purpose: establish whether anything beyond a linear probe on Whisper features helps at
+# all. With 15k pairs, a bigger conditioner is not obviously better, and without this rung
+# we cannot claim the larger ones earn their capacity.
+arch: s2a_audioldm_whisper_mean_linear

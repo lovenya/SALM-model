@@ -32,8 +32,23 @@ export TOKENIZERS_PARALLELISM=false
 # 48 CPUs / 4 ranks = 12 each; leave headroom for dataloader workers.
 export OMP_NUM_THREADS=6
 
-OUT_ROOT="$SALM_SCRATCH/salm_model"
-FEATURES_ROOT="$OUT_ROOT/features"
+# Dedicated output root for this repo. Deliberately NOT under salm_migration_clean, which
+# belongs to the SpeechAudioLM repo (its datasets, metric caches, venvs).
+OUTPUTS_ROOT="${OUTPUTS_ROOT:-/scratch/l/lovenya/salm_model_outputs}"
+FEATURES_ROOT="$OUTPUTS_ROOT/features"
+FEATURES_CLAP_ROOT="$OUTPUTS_ROOT/features_clap"
+RUNS_ROOT="$OUTPUTS_ROOT/runs"
+# Back-compat alias: older scripts in this repo referred to OUT_ROOT.
+OUT_ROOT="$OUTPUTS_ROOT"
+mkdir -p "$OUTPUTS_ROOT/logs/slurm"
+
+# W&B must be offline: compute nodes have no internet. `scripts/wandb_sync.sh` uploads
+# afterwards from a login node. Without this, wandb.init blocks on a network timeout.
+export WANDB_MODE="${WANDB_MODE:-offline}"
+export WANDB_ENTITY="${WANDB_ENTITY:-lovenya-org}"
+export WANDB_PROJECT="${WANDB_PROJECT:-salm-s2a}"
+# Keep W&B's own cache/artifacts off the home quota.
+export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$OUTPUTS_ROOT/.wandb_cache}"
 
 salm_print_header() {
     local label="$1"

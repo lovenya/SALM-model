@@ -1,0 +1,5 @@
+# The long run: 100 epochs to find where this saturates.
+#
+# Sized from measured 2.08 min/epoch -> ~208 min of training. The internal deadline is set
+# by the sbatch (TRAIN_MINUTES), not here, so the same config works for any walltime.
+epochs: 100

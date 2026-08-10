@@ -89,14 +89,38 @@ AUDIO_OMNI_CODE_ROOT = Path(
 
 SALM_MODEL_REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Heavy artifacts live outside git, mirroring the SpeechAudioLM convention.
-SALM_MODEL_RUNS_ROOT = Path("/scratch/l/lovenya/salm_migration_clean/salm_model")
-CHECKPOINTS_ROOT = SALM_MODEL_RUNS_ROOT / "checkpoints"
-LOGS_ROOT = SALM_MODEL_RUNS_ROOT / "logs"
+# Heavy artifacts live outside git, in a root dedicated to THIS repo.
+# Deliberately not nested under salm_migration_clean: that tree belongs to the
+# SpeechAudioLM repo (its datasets, metric caches, venvs), and mixing our training
+# outputs into it makes both harder to reason about and to clean up.
+OUTPUTS_ROOT = Path("/scratch/l/lovenya/salm_model_outputs")
+
 # Precomputed VAE latents for the ambient targets, so mel extraction and VAE
 # encoding happen once instead of every epoch.
-FEATURES_ROOT = SALM_MODEL_RUNS_ROOT / "features"
-GENERATIONS_ROOT = SALM_MODEL_RUNS_ROOT / "generations"
+FEATURES_ROOT = OUTPUTS_ROOT / "features"
+# CLAP audio embeddings of the target clips. These are the regression target for the
+# in-loop val cosine metric, which exists because the diffusion loss is flat and
+# therefore useless as a progress signal.
+FEATURES_CLAP_ROOT = OUTPUTS_ROOT / "features_clap"
+
+# One directory per run, grouped by architecture: runs/<arch>/<run_name>/
+RUNS_ROOT = OUTPUTS_ROOT / "runs"
+# Slurm's own %x-%j.out files, so nothing this repo produces lands in
+# salm_migration_clean.
+SLURM_LOGS_ROOT = OUTPUTS_ROOT / "logs" / "slurm"
+
+
+def run_dir(arch: str, run_name: str) -> Path:
+    """Canonical run directory. Everything for one run lives under here."""
+    return RUNS_ROOT / arch / run_name
+
+
+# ---------------------------------------------------------------------------
+# Legacy roots (pre-2026-08-06). Kept only so old artifacts remain findable;
+# do not write here.
+# ---------------------------------------------------------------------------
+
+_LEGACY_RUNS_ROOT = Path("/scratch/l/lovenya/salm_migration_clean/salm_model")
 
 # ---------------------------------------------------------------------------
 # Training environment (see configs/runtime_environments.json)

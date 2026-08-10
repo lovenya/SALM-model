@@ -1,0 +1,48 @@
+# Shared defaults for every S2A AudioLDM run.
+#
+# Layered: base -> arch -> exp, merged left to right by train_ldm.py, so an architecture
+# file states only what differs architecturally and an experiment file only what differs
+# experimentally. Nothing is duplicated across the ladder.
+
+direction: s2a
+train_split: train
+val_split: val
+speech_seconds: 16.0          # covers the observed TTAS max (~16.1 s) without truncation
+
+# Optimisation. 16 per GPU x 4 GPUs = effective 64 -> ~234 steps/epoch on 15,033 rows.
+batch_size: 16
+# 8 workers x 4 ranks = 32 of the node's 48 CPUs. Speech decode + 24k->16k resample is
+# CPU-bound, so this is where the spare cores help.
+num_workers: 8
+
+# The U-Net is pretrained and the conditioner is not, so they get very different rates.
+# Too high an LR on the U-Net erases the audio prior, which is the main thing we borrow.
+lr_mapper: 1.0e-4
+lr_unet: 1.0e-5
+weight_decay: 1.0e-2
+warmup_steps: 300
+grad_clip: 1.0
+
+# AudioLDM trains its unconditional branch by dropping the condition; needed for
+# classifier-free guidance at sampling time.
+cfg_dropout_prob: 0.1
+
+freeze_unet: false
+seed: 1337
+
+amp_dtype: bf16               # H100: no loss scaling needed
+log_every: 25
+val_every_epochs: 1
+
+# 20, not 5. Each resumable checkpoint is ~869 MB and scratch runs ~90% full; every-5
+# over 100 epochs would write 18.7 GB per run. Periodic snapshots are fp16 and
+# non-resumable, which halves them again.
+save_every_epochs: 20
+snapshot_fp16: true
+
+wandb_enabled: true
+wandb_project: salm-s2a
+# Explicit: the account default_entity is another project's team ('gaspardbtt-'), so
+# leaving this blank would silently log there.
+wandb_entity: lovenya-org
+wandb_mode: offline           # compute nodes have no internet; sync afterwards

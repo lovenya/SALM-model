@@ -1,0 +1,8 @@
+# L1 -- learned attention pooling + MLP head (~7M params), no temporal self-attention.
+#
+# Isolates the value of learned pooling over mean-pooling. Matters because Whisper pads to
+# 30 s while TTAS speech averages 4.9 s, so pooling choice decides how much silence gets
+# averaged in.
+arch: s2a_audioldm_whisper_attn_mlp
+mapper_hidden_dim: 1024
+mapper_dropout: 0.1

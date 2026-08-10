@@ -38,10 +38,12 @@ class S2ALatentDataset(Dataset):
         self,
         features_dir: str | Path,
         speech_seconds: float = DEFAULT_SPEECH_SECONDS,
+        clap_dir: str | Path | None = None,
     ) -> None:
         self.features_dir = Path(features_dir)
         self.speech_seconds = speech_seconds
         self.speech_samples = int(round(speech_seconds * AUDIOLDM_SR))
+        self.clap_dir = Path(clap_dir) if clap_dir else None
 
         meta_path = self.features_dir / "meta.json"
         if not meta_path.exists():
@@ -67,6 +69,24 @@ class S2ALatentDataset(Dataset):
                 f"{self.latents_mean.shape[0]} -- precompute output is inconsistent."
             )
 
+        # CLAP embeddings of the target clips, used for the val cosine metric. Optional
+        # because training does not need them -- only the diagnostic does.
+        self.clap_target = None
+        if self.clap_dir is not None:
+            path = self.clap_dir / "clap_target.npy"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"{path} not found. Run scripts/precompute_clap_targets.py, or set "
+                    "clap_features_root='' to train without the cosine metric."
+                )
+            self.clap_target = np.load(path, mmap_mode="r")
+            if self.clap_target.shape[0] != len(self.rows):
+                raise ValueError(
+                    f"CLAP targets have {self.clap_target.shape[0]} rows but index.jsonl "
+                    f"has {len(self.rows)}. These must be built from the same index or the "
+                    "cosine metric compares mismatched pairs."
+                )
+
     @property
     def latent_shape(self) -> tuple[int, ...]:
         return tuple(self.latents_mean.shape[1:])
@@ -88,7 +108,7 @@ class S2ALatentDataset(Dataset):
         fixed = np.zeros(self.speech_samples, dtype=np.float32)
         fixed[:true_len] = wav[:true_len]
 
-        return {
+        item = {
             "speech": torch.from_numpy(fixed),
             "speech_length": torch.tensor(true_len, dtype=torch.long),
             "latent_mean": torch.from_numpy(np.asarray(self.latents_mean[li], dtype=np.float32)),
@@ -97,11 +117,16 @@ class S2ALatentDataset(Dataset):
             "audio_cap": row["audio_cap"],
             "speech_text": row["speech_text"],
         }
+        if self.clap_target is not None:
+            item["clap_target"] = torch.from_numpy(
+                np.asarray(self.clap_target[li], dtype=np.float32)
+            )
+        return item
 
 
 def collate(batch: list[dict]) -> dict:
     """Stack tensors, keep strings as lists."""
-    return {
+    out = {
         "speech": torch.stack([b["speech"] for b in batch]),
         "speech_length": torch.stack([b["speech_length"] for b in batch]),
         "latent_mean": torch.stack([b["latent_mean"] for b in batch]),
@@ -110,3 +135,6 @@ def collate(batch: list[dict]) -> dict:
         "audio_cap": [b["audio_cap"] for b in batch],
         "speech_text": [b["speech_text"] for b in batch],
     }
+    if "clap_target" in batch[0]:
+        out["clap_target"] = torch.stack([b["clap_target"] for b in batch])
+    return out

@@ -1,0 +1,10 @@
+# L3 -- k learned queries cross-attend to the frames, concatenated then projected (~19M).
+#
+# Probes whether a single pooled vector is the limiting factor: multiple queries can each
+# specialise before the final projection, while still fitting AudioLDM's single-vector
+# conditioning interface.
+arch: s2a_audioldm_whisper_qformer
+mapper_hidden_dim: 1024
+mapper_num_queries: 8
+mapper_layers: 2
+mapper_dropout: 0.1
