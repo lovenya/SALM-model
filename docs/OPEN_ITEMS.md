@@ -73,6 +73,10 @@ the outcome.
 - **VAE posterior is nearly deterministic** (`E[σ]=0.088`), so posterior sampling adds almost no
   augmentation — an assumption that turned out not to hold.
 - **`best` and `last` are both epoch 90** and probably byte-identical.
+- **W&B drops non-increasing steps.** We log with an explicit `step=global_step`, and a resumed job
+  rejoins the same run id, so resuming from a checkpoint *behind* the furthest-logged step silently
+  loses metrics until it catches up. `checkpoint_last` is always safe; `checkpoint_best` may not be.
+  Now warned about loudly at resume time. `history.json` is unaffected either way.
 
 ## Questions you raised that we deferred
 

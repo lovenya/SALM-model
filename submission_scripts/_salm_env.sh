@@ -47,8 +47,19 @@ mkdir -p "$OUTPUTS_ROOT/logs/slurm"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_ENTITY="${WANDB_ENTITY:-lovenya-org}"
 export WANDB_PROJECT="${WANDB_PROJECT:-salm-s2a}"
-# Keep W&B's own cache/artifacts off the home quota.
+# Keep every W&B directory off the home quota. WANDB_CACHE_DIR alone is not enough: config,
+# data and artifact dirs all default under $HOME, and home is at ~83% of its 250k inode limit.
 export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$OUTPUTS_ROOT/.wandb_cache}"
+export WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-$OUTPUTS_ROOT/.wandb_config}"
+export WANDB_DATA_DIR="${WANDB_DATA_DIR:-$OUTPUTS_ROOT/.wandb_data}"
+export WANDB_ARTIFACT_DIR="${WANDB_ARTIFACT_DIR:-$OUTPUTS_ROOT/.wandb_artifacts}"
+
+# Do NOT be tempted by `module load httpproxy` to run W&B online here. It is loadable on TamIA
+# (httpproxy/1.0), but Alliance Canada explicitly warns against pairing it with wandb: no artifact
+# support, the logger hangs after training completes and wastes the rest of the allocation, and
+# wandb still tries to push environment info to a Google Cloud Storage bucket that is blocked --
+# crashing during or at the very end of a run. Offline + `wandb sync` is the only supported mode
+# unless you have a MILA (`mila-org`) account or a PI-arranged GCS bypass. We have neither.
 
 salm_print_header() {
     local label="$1"

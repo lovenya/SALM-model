@@ -662,6 +662,20 @@ def main() -> int:
             log(f"    loaded {len(history)} prior epochs from history.json "
                 f"(best val {best_val:.4f})")
 
+            # W&B silently DISCARDS any row whose step is not greater than the maximum step it has
+            # already recorded for this run id. Since we log with an explicit step=global_step and
+            # a resumed job rejoins the same run id, resuming from a checkpoint that is BEHIND the
+            # furthest-logged step means every metric until we catch up vanishes with no error.
+            # `checkpoint_last` is always the furthest, so it is safe; `checkpoint_best` may not be.
+            max_logged = max((h.get("step", 0) for h in history), default=0)
+            if global_step < max_logged:
+                log(f"    WARNING: resuming at step {global_step} but history reaches "
+                    f"{max_logged}.")
+                log(f"             W&B will DROP logged metrics until step {max_logged} is passed "
+                    "(it rejects non-increasing steps for a resumed run id).")
+                log("             history.json will still be correct. To avoid the gap, resume from "
+                    "checkpoint_last, or delete wandb_run_id.txt to start a fresh W&B run.")
+
     wandb_run = init_wandb(cfg, run_dir, world_size)
 
     # ------------------------------------------------------------------ train

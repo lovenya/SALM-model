@@ -45,17 +45,31 @@ if [[ ${#OFFLINE[@]} -eq 0 ]]; then
 fi
 
 echo "found ${#OFFLINE[@]} offline run(s); entity=$WANDB_ENTITY project=$WANDB_PROJECT"
-FAIL=0
-for d in "${OFFLINE[@]}"; do
-    echo "--- syncing $d"
-    # `wandb sync` is idempotent: already-synced runs are skipped, so re-running is safe.
-    if wandb sync --project "$WANDB_PROJECT" --entity "$WANDB_ENTITY" "$d"; then
-        echo "    OK"
-    else
-        echo "    FAILED" >&2
-        FAIL=1
-    fi
-done
+for d in "${OFFLINE[@]}"; do echo "  $d"; done
 
-[[ "$FAIL" == "0" ]] || { echo "at least one sync failed" >&2; exit 1; }
-echo "all synced"
+# Never sync a run that is still being written: a premature `.wandb.synced` marker makes every
+# later sync skip it, silently losing the rest of the run.
+if squeue -u "$USER" -h -t R 2>/dev/null | grep -q .; then
+    echo
+    echo "WARNING: you have RUNNING jobs. If any is still writing one of the dirs above, syncing"
+    echo "         it now will mark it synced and later data will be skipped. Ctrl-C to abort;"
+    echo "         continuing in 10s."
+    sleep 10
+fi
+
+# ONE invocation with every directory, not a loop. In wandb 0.28.1 `wandb sync` reroutes to
+# `wandb beta sync`, which orders fragments belonging to the same run id by start time itself --
+# a resumed run writes several offline dirs sharing one id, and letting beta sync see them all
+# together is more reliable than us sorting directory names. Re-running is safe: beta sync
+# defaults to skip_synced=True, keyed on a `<name>.wandb.synced` marker.
+echo
+if wandb sync --yes --project "$WANDB_PROJECT" --entity "$WANDB_ENTITY" "${OFFLINE[@]}"; then
+    echo
+    echo "synced. markers written:"
+    find "$SEARCH_ROOT" -name "*.wandb.synced" 2>/dev/null | wc -l
+    echo "offline dirs are safe to delete AFTER syncing, but keep wandb_run_id.txt in each run dir"
+    echo "or a future resume will start a new W&B run instead of continuing the existing one."
+else
+    echo "sync FAILED" >&2
+    exit 1
+fi
