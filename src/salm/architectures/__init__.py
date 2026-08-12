@@ -110,6 +110,25 @@ CONDITIONERS: dict[str, Callable] = {
 LADDER = ["mean_linear", "attn_mlp", "xformer", "qformer"]
 
 
+def parse_encoder(arch: str) -> str:
+    """
+    Encoder name only, for models that have no conditioner in the CONDITIONERS registry.
+
+    T0 (`s2a_t0_whisper_regress`, trained by salm.train_regress) predicts the target latent
+    directly, so it has a LatentRegressor rather than a conditioner that writes into AudioLDM's
+    512-d slot. It still needs the same frozen encoder, so it needs the encoder half of
+    `parse_arch` without the conditioner half. Registering a fake conditioner entry to satisfy
+    the stricter parser would let `build()` construct a nonsense model for this arch name, which
+    is worse than a second small function.
+    """
+    encoder = next((p for p in arch.split("_") if p in ENCODERS), None)
+    if encoder is None:
+        raise ValueError(
+            f"cannot find an encoder in arch {arch!r}. encoders: {sorted(ENCODERS)}"
+        )
+    return encoder
+
+
 def parse_arch(arch: str) -> tuple[str, str]:
     """
     's2a_audioldm_whisper_xformer' -> ('whisper', 'xformer').

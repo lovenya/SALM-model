@@ -62,6 +62,13 @@ class TrainConfig:
     cond_dropout: float = 0.1
     cond_num_queries: int = 8    # qformer only
 
+    # T0 latent regressor (salm.train_regress only; ignored by the diffusion trainer). One
+    # learned query per output latent frame, each cross-attending to the encoder frames.
+    regress_d_model: int = 512
+    regress_n_heads: int = 8
+    regress_layers: int = 2
+    regress_dropout: float = 0.1
+
     # optimization
     batch_size: int = 16          # per GPU
     num_workers: int = 6

@@ -1,0 +1,49 @@
+# T0 -- direct latent regression. The rung BELOW every diffusion model, and the answer to
+# "start from something very simple".
+#
+#   frozen Whisper -> 9.26 M transformer -> latent (8,256,16) -> frozen VAE -> frozen vocoder
+#
+# No diffusion, no noise schedule, no U-Net, one forward pass. Trained by salm.train_regress,
+# NOT salm.train_ldm -- the objective is plain MSE on the latent.
+#
+# This is what makes "a simple transformer trained from scratch" a coherent baseline instead of a
+# hopeless one. A transformer generating raw audio from scratch on 42 h of data would produce
+# noise. Here everything already measured healthy stays frozen (VAE round-trip 0.9993, mel
+# round-trip 0.9895) and the ONLY learned part is the speech -> latent map, so the experiment
+# isolates the diffusion process itself rather than confounding it with codec learning.
+#
+# EXPECTED OUTCOME and the number to watch: `val_std_ratio`. Measured on our own train latents,
+# a single real latent has std 1.032 while a blend of two has 0.753 and a blend of 16 has 0.421.
+# AudioLDM's decoder expects ~1.0. A regressor must interpolate on held-out inputs, so its
+# predictions should come out low-variance and decode washed out. If the ratio lands near 0.5
+# while diffusion stays near 1.0, that single number is the measured justification for diffusion.
+#
+# Note this is NOT the "one-to-many" argument, which was wrong for our data: the pairing is 1:1,
+# 15,033 speech clips against 15,033 distinct targets, so nothing forces averaging during
+# training. The claim is about latent-space geometry at generalisation time. See
+# docs/EXPERIMENT_LOG.md.
+#
+# Launch (note the different module):
+#   torchrun --nproc_per_node=4 -m salm.train_regress \
+#     --config configs/base/s2a_audioldm.yaml configs/arch/s2a_t0_whisper_regress.yaml \
+#              configs/exp/long100.yaml
+
+arch: s2a_t0_whisper_regress
+
+# 9.26 M params at Whisper's 1280-d input and an (8,256,16) target -- between L1 (7.09 M) and
+# L3 (18.63 M), so it is not handicapped by capacity relative to the ladder it is compared with.
+regress_d_model: 512
+regress_n_heads: 8
+regress_layers: 2
+regress_dropout: 0.1
+
+# Trained from scratch with no pretrained partner to preserve, so it takes the conditioner-style
+# rate rather than the U-Net's 1e-5. Same value as the frozen-U-Net rung for comparability.
+lr_conditioner: 3.0e-4
+
+# No U-Net exists in this model. Set so anything reading the config cannot misinterpret it.
+freeze_unet: true
+
+# Selection on val_loss is meaningful HERE, unlike in the diffusion runs: this loss is a direct
+# MSE against a fixed target with no timestep sampling, so it is not swamped by schedule noise.
+select_metric: val_loss
