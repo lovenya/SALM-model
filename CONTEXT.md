@@ -15,6 +15,8 @@ Update it via the `/update-docs` skill after every meaningful milestone.
   wrong. The place to look for "why is it like this?" and for every number we have.
 - `docs/OPEN_ITEMS.md` — what is still to discuss, decide or implement. Kept separate so nothing
   gets lost at the current pace.
+- `docs/ARCHITECTURE_MENU.md` — the options for what to try next, tiered so every added component
+  is licensed by a measured gap against something simpler. Carries the research evidence.
 - `docs/wandb_setup.md` — W&B on this cluster (offline mode, sync workflow, the entity trap).
 - `CLAUDE.md` — hard rules, chiefly: **never touch Slurm jobs without explicit instruction.**
 
