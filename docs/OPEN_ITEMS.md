@@ -25,16 +25,27 @@ the outcome.
 
 ## Decisions needed
 
-- **[DISCUSS] Register our model in `SpeechAudioLM/configs/model_capabilities.json`.** It is a plain
-  whitelist: `evaluate.py` validates `--model` against it and hard-refuses otherwise
-  ("Unknown model 'salm_audioldm_whisper'. Known models: audio_omni, audiogen, cascaded, ..."), so
-  the metric suite cannot run at all until the name is listed. One line —
-  `"salm_audioldm_whisper": {"tasks": ["S2A","T2A"]}` — no behaviour change beyond permitting the
-  name. It edits the *other* repo though, against the clean-room principle. Alternatives: pass an
-  already-registered name such as `--model cascaded` (works, but files our results under someone
-  else's label), or you make the edit.
-  Why it matters: cascade metrics already exist, so registering is what lets **our** numbers be
-  scored by the **same** metrics into the same tree and be directly comparable.
+- **[DONE 2026-08-12] Registered in `SpeechAudioLM/configs/model_capabilities.json`** as
+  **`salm_e2e`** with `["S2A", "T2A", "A2S"]`. Verified: `validate_model_task` accepts all three and
+  correctly rejects `T2T`.
+
+  *Why this name and not `salm_audioldm_whisper`:* an arch-specific name would need re-registering for
+  every ladder rung (L0, L1, L3, a Qwen encoder, AudioLDM 2), i.e. repeated edits to the other repo.
+  One stable umbrella name means we touch it once; the architecture lives in the run path instead.
+
+  *What registration is:* a plain whitelist. `evaluate.py` calls `validate_model_task` and hard-fails
+  with "Unknown model ... Known models: ..." otherwise, so the metric suite could not run at all.
+  Adding the name changes nothing else. Its *purpose* is that our outputs get scored by the **same**
+  metrics into the same results tree as the cascade numbers that already exist.
+
+  The edit is **left uncommitted** in `SpeechAudioLM` — that file also carries the user's own unstaged
+  `dataset_pair` change, so staging it is theirs to do. (A first attempt reformatted the whole file via
+  `json.dumps`, turning a 3-line diff into 53; reverted and re-done as a surgical insert.)
+
+  **Follow-up, agreed with the user:** the existing cascade S2A/T2A evals ran on 2,277 test rows (the
+  unfiltered split) while our clean_v2 S2A test has 1,878. The results will be filtered to matching
+  rows before any head-to-head comparison is reported.
+
 - **[RESOLVED 2026-08-12] The pipeline baseline needs no work** — it already exists and is scored.
   For S2A the cascade *is* ASR → LLM → T2A, so my "minimal two-stage vs heavy four-stage" distinction
   was meaningless. `fad`/`kad`/`kl_passt`/`inception_score`/`target_caption_clap_score` summaries are
