@@ -100,7 +100,10 @@ class ClapAudioEncoder:
         ]
         inputs = self.processor(audio=wavs_48k, sampling_rate=self.SR, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        feats = self.model.get_audio_features(**inputs)
+        # transformers 5.x returns BaseModelOutputWithPooling, with the (already
+        # L2-normalized) embedding on .pooler_output; older versions returned a tensor.
+        out = self.model.get_audio_features(**inputs)
+        feats = out if torch.is_tensor(out) else out.pooler_output
         return F.normalize(feats, dim=-1)
 
 

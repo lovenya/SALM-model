@@ -56,30 +56,48 @@ else
         --direction s2a --split val 2>&1 | tee "$LOG_DIR/01_clap_val.log"
 fi
 
-# ============================================================ 2. first 2 epochs
+# ======================================== 2. partial run, stopped by the deadline
+# Both parts declare the SAME epochs=4 target, and part 1 is cut short by
+# max_train_minutes instead of a lower epoch count. That matters: the LR schedule is
+# built from total_steps = steps_per_epoch * epochs, so changing `epochs` between the two
+# parts would reshape the cosine curve and produce an LR discontinuity that is an artifact
+# of the test rather than a resume bug. Stopping on the deadline is also exactly the real
+# scenario this protects against -- a 4 h job hitting its walltime and being resubmitted.
 echo
-echo "### [2/5] Train epochs 0-1 ###"
+echo "### [2/5] Train with a 3-minute deadline (stops partway, epochs=4 target) ###"
 torchrun --nproc_per_node=4 --master_port=29531 -m salm.train_ldm \
     "${CFG[@]}" \
-    --override "run_name=$RUN_NAME" "arch=$ARCH" "epochs=2" \
+    --override "run_name=$RUN_NAME" "arch=$ARCH" "epochs=4" "max_train_minutes=3" \
     2>&1 | tee "$LOG_DIR/02_train_part1.log"
 
-python - <<PY
-import json, pathlib, sys
+PART1_EPOCHS=$(python - <<PY
+import json, pathlib
 h = json.loads((pathlib.Path("$RUN_DIR") / "history.json").read_text())
-print(f"after part 1: {len(h)} epochs -> {[r['epoch'] for r in h]}")
-assert len(h) == 2, f"expected 2 epochs, got {len(h)}"
+print(len(h))
 PY
+)
+echo "part 1 completed $PART1_EPOCHS epoch record(s)"
+if [[ "$PART1_EPOCHS" -lt 1 ]]; then
+    echo "ERROR: part 1 produced no epoch records; deadline was too short." >&2
+    exit 1
+fi
+if [[ "$PART1_EPOCHS" -ge 4 ]]; then
+    echo "ERROR: part 1 finished all 4 epochs, so resume is not exercised." >&2
+    echo "       Lower max_train_minutes." >&2
+    exit 1
+fi
 
-# ============================================== 3. resume for 2 more epochs
+# ============================================ 3. resume to the same epoch target
 echo
-echo "### [3/5] RESUME from checkpoint_last.pt for epochs 2-3 ###"
+echo "### [3/5] RESUME from checkpoint_last.pt to finish epochs up to 4 ###"
 CKPT="$RUN_DIR/checkpoints/checkpoint_last.pt"
 ls -la "$CKPT"
 torchrun --nproc_per_node=4 --master_port=29532 -m salm.train_ldm \
     "${CFG[@]}" \
     --override "run_name=$RUN_NAME" "arch=$ARCH" "epochs=4" "resume_from=$CKPT" \
     2>&1 | tee "$LOG_DIR/03_train_resume.log"
+
+grep -E "exact resume|WARM START|loaded .* prior epochs" "$LOG_DIR/03_train_resume.log" || true
 
 # ==================================================== 4. assert resume worked
 echo
@@ -95,15 +113,23 @@ print(f"epochs: {epochs}")
 print(f"steps:  {steps}")
 
 fail = []
-if len(h) != 4:
-    fail.append(f"history has {len(h)} entries, expected 4 (resume truncated it?)")
-if epochs != sorted(set(epochs)) or epochs != [0, 1, 2, 3]:
-    fail.append(f"epochs not contiguous 0..3: {epochs}")
+# Contiguous 0..3 with no repeats: proves resume neither truncated history nor re-ran
+# epochs it had already completed.
+if epochs != [0, 1, 2, 3]:
+    fail.append(f"epochs not contiguous 0..3: {epochs} "
+                "(history truncated, or epochs repeated instead of continuing)")
 if steps != sorted(steps) or len(set(steps)) != len(steps):
     fail.append(f"global_step did not continue monotonically: {steps}")
 
-# The LR must continue its cosine decay, not re-warm from ~0. Compare the first logged LR
-# after resume against the last one before it.
+# The log must claim an exact resume; a warm start means optimizer state was missing.
+resume_log = (run_dir / "logs/03_train_resume.log").read_text()
+if "exact resume" not in resume_log:
+    fail.append("resume log lacks 'exact resume' -- optimizer/scheduler state was missing, "
+                "so this was only a warm start")
+
+# The LR must continue its cosine decay. Both parts declare epochs=4 so total_steps is
+# identical and the curve is genuinely continuous; a jump in EITHER direction means the
+# scheduler state was not restored.
 def lrs(path):
     out = []
     for line in pathlib.Path(path).read_text().splitlines():
@@ -114,12 +140,15 @@ def lrs(path):
 
 pre, post = lrs(run_dir / "logs/02_train_part1.log"), lrs(run_dir / "logs/03_train_resume.log")
 if pre and post:
-    print(f"LR last-before-resume={pre[-1]:.3e}  first-after-resume={post[0]:.3e}")
-    # Re-warming from step 0 would give an LR orders of magnitude smaller.
-    if post[0] < pre[-1] * 0.5:
+    ratio = post[0] / pre[-1] if pre[-1] > 0 else float("inf")
+    print(f"LR last-before-resume={pre[-1]:.3e}  first-after-resume={post[0]:.3e}  "
+          f"ratio={ratio:.3f}")
+    # Cosine decay moves the LR only a few percent per logging interval. A re-warm from
+    # step 0 collapses it toward zero; a reshaped schedule jumps it upward.
+    if not (0.7 <= ratio <= 1.3):
         fail.append(
-            f"LR restarted after resume ({post[0]:.3e} vs {pre[-1]:.3e}); "
-            "optimizer/scheduler state was not restored"
+            f"LR discontinuity across resume (ratio {ratio:.3f}, expected ~1.0); "
+            "scheduler state was not restored correctly"
         )
 else:
     fail.append("could not parse LRs from logs")

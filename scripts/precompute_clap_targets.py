@@ -51,6 +51,27 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def clap_audio_embeddings(model, inputs: dict) -> torch.Tensor:
+    """
+    Get the CLAP audio embedding as a plain tensor.
+
+    In transformers 5.x, `ClapModel.get_audio_features` returns a
+    `BaseModelOutputWithPooling`, not a tensor, and the embedding sits on
+    `.pooler_output` -- already L2-normalized by the model itself:
+
+        audio_features = self.audio_projection(audio_outputs.pooler_output)
+        audio_outputs.pooler_output = F.normalize(audio_features, dim=-1)
+        return audio_outputs
+
+    (verified in transformers/models/clap/modeling_clap.py). Older versions returned the
+    tensor directly, so both shapes are handled. The final `normalize` is therefore a
+    no-op on 5.x but keeps the contract explicit and correct on older builds.
+    """
+    out = model.get_audio_features(**inputs)
+    feats = out if torch.is_tensor(out) else out.pooler_output
+    return F.normalize(feats, dim=-1)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--direction", default="s2a", choices=["s2a", "a2s"])
@@ -119,10 +140,7 @@ def main() -> int:
         inputs = processor(audio=wavs, sampling_rate=CLAP_SR, return_tensors="pt")
         inputs = {k: v.to(args.device) for k, v in inputs.items()}
         with torch.no_grad():
-            feats = model.get_audio_features(**inputs)
-            # L2-normalize, matching how AudioLDM's pipeline normalizes conditions, so
-            # cosine is just a dot product downstream.
-            feats = F.normalize(feats, dim=-1)
+            feats = clap_audio_embeddings(model, inputs)
         embeddings[start : start + len(batch)] = feats.float().cpu().numpy()
 
         done = start + len(batch)
