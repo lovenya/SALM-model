@@ -34,6 +34,20 @@ amp_dtype: bf16               # H100: no loss scaling needed
 log_every: 25
 val_every_epochs: 1
 
+# Timestep-bucket losses cost 4 extra U-Net passes over the val set; D1/D2 cost 2 more at one
+# fixed low timestep. Both change slowly, so every 5th epoch is plenty.
+bucket_every_epochs: 5
+# D1/D2 per-epoch turns "is the model using the speech at all?" into a CURVE. This is the
+# question eps-MSE provably cannot answer: over 91 epochs the loss sat at 0.1979 +/- 0.0070
+# with no trend, which is equally consistent with learning and with ignoring the condition.
+diag_every_epochs: 5
+
+# Model selection. val_loss is KNOWN BROKEN for this task -- the "best" 0.1833 of the 91-epoch
+# run matched the expected minimum of 91 draws from its own noise band (0.1805), so it was
+# selecting a random epoch. Retrieval accuracy in CLAP space has a real chance baseline
+# (1/batch_size = 0.0625) and so can actually be beaten rather than merely fluctuated into.
+select_metric: val_clap_r1
+
 # 20, not 5. Each resumable checkpoint is ~869 MB and scratch runs ~90% full; every-5
 # over 100 epochs would write 18.7 GB per run. Periodic snapshots are fp16 and
 # non-resumable, which halves them again.

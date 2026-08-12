@@ -1,0 +1,41 @@
+# Shared settings for every ladder rung, so the ONLY thing that differs between rungs is the
+# conditioner (and, for L0f, whether the U-Net trains).
+#
+# Comparability rule: every rung must share `epochs` AND `lr_total_steps`. With a derived LR
+# curve a truncated run is not comparable to a completed one -- a 5-epoch run would be fully
+# annealed at epoch 5 (factor 0.000) while a 100-epoch run is at 0.997 there.
+#
+# Do NOT edit this to tune a single rung; that breaks every comparison already run against it.
+
+direction: s2a
+train_split: train
+val_split: val
+speech_seconds: 16.0          # covers the observed TTAS max (~16.1 s) without truncation
+
+encoder: whisper
+
+batch_size: 16                # 16 x 4 GPUs = effective 64
+num_workers: 8
+
+epochs: 100
+lr_total_steps: 23400         # 100 x 234 steps/epoch; pinned so truncated runs stay comparable
+
+lr_conditioner: 1.0e-4
+lr_unet: 1.0e-5
+weight_decay: 1.0e-2
+warmup_steps: 300
+grad_clip: 1.0
+cfg_dropout_prob: 0.1
+seed: 1337
+
+amp_dtype: bf16
+log_every: 25
+val_every_epochs: 1
+bucket_every_epochs: 5
+diag_every_epochs: 5          # D1/D2 as a CURVE -- the metric eps-MSE cannot give us
+save_every_epochs: 20
+
+# Selection on val_loss is known broken here: 91 epochs of 0.1979 +/- 0.0070 with no trend, and
+# the "best" 0.1833 matched the expected minimum of 91 noise draws (0.1805). Retrieval accuracy
+# in CLAP space has a real chance baseline (1/batch_size = 0.0625), so it can actually be beaten.
+select_metric: val_clap_r1

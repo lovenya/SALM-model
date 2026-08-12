@@ -1,0 +1,54 @@
+# O2 -- add an auxiliary alignment loss pulling the conditioner output toward the CLAP audio
+# embedding of the TRUE target clip.
+#
+#   L = L_DDPM + lambda_align * (1 - cos(cond, clap_target))
+#
+# WHY this is the top recommendation, on two independent grounds:
+#
+# 1. The conditioner's only gradient is through the diffusion loss: one random timestep per
+#    sample, averaged over a difficulty gradient that dominates the number. Measured bucket
+#    losses 0.559/0.169/0.024/0.001 at t=125/375/625/875 track the schedule's SNR almost
+#    perfectly inversely, so the conditioner's contribution is a sub-percent correction on a
+#    large constant.
+# 2. MEASURED DATA SCALE: 13,959 unique captions across 15,033 pairs = 1.1 pairs per scene.
+#    The task is close to one-shot per scene, so the binding constraint is supervision DENSITY
+#    per example, not example count. An auxiliary dense target is exactly that; more data is not.
+#
+# Precedent: Latent CLAP Loss (arXiv 2403.12182, EUSIPCO 2024) on nearly our setup -- AudioLDM
+# base, CLAP/VAE/vocoder frozen, LDM trainable -- reports FAD 8.74 -> 7.10 (~19% relative),
+# human quality 6.00 -> 6.40 and class relevance 6.55 -> 7.03, both p < .001.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY NOT lambda = 2000, the published value. This is a correction to an earlier recommendation
+# in this repo, and it matters:
+#
+# That paper's term is a SQUARED ERROR on UNNORMALIZED 512-d embeddings, damped by
+# w(n) = 10^(-n/200) so that all but the lowest-noise timesteps contribute ~0. Its effective
+# magnitude is therefore tiny, and lambda must be huge to compensate.
+#
+# Our conditioner L2-normalizes its output (src/salm/conditioners.py) and CLAP targets are
+# already unit vectors, so our term is (1 - cos), bounded [0, 2] and sitting at ~1.0 at init --
+# against a diffusion loss of ~0.198. lambda = 2000 would make the auxiliary term roughly
+# 10,000x the objective and reduce the diffusion loss to decoration. The number does not
+# transfer between formulations, and copying it would have been a silent, expensive mistake.
+#
+# Scale reference at init: diffusion ~0.198, (1 - cos) ~1.0.
+#   lambda 0.2  -> the two terms are comparable
+#   lambda 1.0  -> alignment is ~5x the diffusion term  <-- chosen
+#   lambda 5.0+ -> alignment dominates; the diffusion loss is nearly ignored
+#
+# 1.0 is deliberately on the aggressive side, because the diffusion signal is precisely what we
+# suspect is too weak. This is a hyperparameter to SWEEP (0.2 / 1.0 / 5.0), not a tuned value.
+# ---------------------------------------------------------------------------------------------
+#
+# Requires CLAP targets precomputed for the TRAIN split. The trainer raises at startup if they
+# are missing rather than silently training the plain objective for hours.
+#
+# NOTE ON METRICS: with this loss active, val_clap_cos and val_clap_r1 are partly measuring the
+# training objective. They stay useful as a sanity check that the term is doing what it says,
+# but they are NOT independent evidence of quality any more, and any held-out CLAP-based score
+# carries the same caveat. Judge O2 against a rung trained WITHOUT it, on generation-time
+# metrics computed after the fact.
+
+lambda_align: 1.0
+align_warmup_steps: 0

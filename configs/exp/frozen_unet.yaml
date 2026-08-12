@@ -1,0 +1,24 @@
+# L0f / L2f -- freeze the U-Net, train ONLY the conditioner.
+#
+# This is the rung that actually isolates the conditioner, and it is the one the whole ladder
+# hinges on. Reason: with the U-Net trainable, 185M pretrained params co-adapt to TTAS audio
+# statistics, and that domain adaptation can lower the loss on its own while the conditioner
+# learns nothing. Every number from the 91-epoch run is ambiguous for exactly this reason.
+#
+# Two things become valid only when the U-Net is frozen:
+#   - val_clap_cos / val_clap_r1 mean what they claim. With a co-adapting U-Net the conditioner
+#     is free to drift off CLAP's space and still work, so a low cosine is not evidence of
+#     failure. Frozen, the conditioner MUST land in CLAP space, so the metric is honest.
+#   - the comparison to V2A-Mapper, which keeps its generator completely frozen.
+#
+# Compose with any arch file, e.g.:
+#   --config configs/base/s2a_audioldm.yaml \
+#            configs/arch/s2a_audioldm_whisper_mean_linear.yaml \
+#            configs/exp/long100.yaml configs/exp/frozen_unet.yaml
+
+freeze_unet: true
+
+# The conditioner is now the only thing learning, and it no longer has a 185M co-adapting
+# partner to hide behind, so it can take a higher rate. Still conservative: this is the one
+# free parameter that would break comparability with the trainable-U-Net rungs if tuned per run.
+lr_conditioner: 3.0e-4

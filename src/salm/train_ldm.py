@@ -85,6 +85,33 @@ class TrainConfig:
     freeze_unet: bool = False     # True reduces this to a conditioner-only run
     seed: int = 1337
 
+    # ---- O2: auxiliary alignment loss (conditioner output -> CLAP of the true target) ----
+    #
+    # L = L_DDPM + lambda_align * (1 - cos(cond, clap_target))
+    #
+    # Motivation: the conditioner's only gradient is through the diffusion loss, which is one
+    # random timestep per sample averaged over a difficulty gradient that dominates the number.
+    # At 1.1 pairs per unique scene (measured) that signal is very likely too weak. Latent CLAP
+    # Loss (arXiv 2403.12182) is the published precedent: FAD 8.74 -> 7.10 on nearly our setup.
+    #
+    # WHY NOT lambda=2000, the published value: that paper's term is a squared error on
+    # UNNORMALIZED 512-d embeddings, damped by w(n)=10^(-n/200) so most timesteps contribute
+    # ~0. Our conditioner L2-normalizes its output (conditioners.py) and CLAP targets are
+    # already normalized, so our term is bounded [0, 2] and sits at ~1.0 at init against a
+    # diffusion loss of ~0.198. lambda=2000 would make the auxiliary term ~10,000x the
+    # objective and reduce the diffusion loss to decoration. The number does not transfer.
+    #
+    # Scale reference at init: diffusion ~0.198, (1 - cos) ~1.0. So lambda_align=0.2 makes the
+    # two terms comparable, and 1.0 makes alignment ~5x the diffusion loss (aggressive, but
+    # defensible when the diffusion signal is the thing we suspect is too weak). Sweep it.
+    #
+    # 0.0 = off, which keeps every existing config bit-identical in behaviour.
+    lambda_align: float = 0.0
+    # Cosine ramp for lambda_align over this many optimizer steps (0 = constant from step 0).
+    # "REPA Works Until It Doesn't" (arXiv 2505.16792) argues for decaying an alignment term
+    # rather than holding it; this is the knob for that experiment, unused by default.
+    align_warmup_steps: int = 0
+
     # runtime
     amp_dtype: str = "bf16"       # H100: bf16 needs no loss scaling
     log_every: int = 25
@@ -93,6 +120,17 @@ class TrainConfig:
     # every epoch, validation was 2.87 of a 4.5 min epoch (64%) while training was only
     # 1.63 min. They change slowly, so every 5th epoch is plenty and buys back most of that.
     bucket_every_epochs: int = 5
+    # D1/D2 during validation cost 2 extra U-Net passes per val batch, at one fixed low
+    # timestep (conditioning matters most at low noise). Run them on the same cadence as the
+    # buckets so "is the model using the speech?" becomes a CURVE instead of a post-hoc number.
+    # This is the metric the flat eps-MSE cannot give us. 0 disables.
+    diag_every_epochs: int = 5
+    # Which validation metric picks `checkpoint_best`. "val_loss" is the historical default and
+    # is KNOWN BROKEN for this task -- it selected the minimum of a stationary series, i.e. a
+    # random epoch (see the comment at the selection site). "val_clap_r1" is the recommended
+    # replacement: it has an unambiguous chance baseline of 1/batch_size. Left at the old
+    # default so queued and completed runs remain reproducible; new configs should override it.
+    select_metric: str = "val_loss"
     # 20, not 5: each checkpoint is ~869 MB, scratch is ~90% full, and 100 epochs at
     # every-5 would write 18.7 GB per run. See CONTEXT.md disk budget.
     save_every_epochs: int = 20
@@ -209,6 +247,11 @@ def init_wandb(cfg: "TrainConfig", run_dir: Path, world_size: int):
     return run
 
 
+# Validation metrics where a LARGER value is better. Everything else is treated as
+# lower-is-better, which is correct for every loss-shaped quantity we log.
+_HIGHER_IS_BETTER = {"val_clap_r1", "val_clap_r5", "val_clap_cos", "val_d1_delta", "val_d2_gap"}
+
+
 def timestep_buckets(num_train_timesteps: int, n_buckets: int = 4) -> list[tuple[int, int]]:
     """
     Edges for per-timestep-bucket validation loss.
@@ -294,23 +337,41 @@ def main() -> int:
     train_dir = Path(cfg.features_root) / cfg.direction / cfg.train_split
     val_dir = Path(cfg.features_root) / cfg.direction / cfg.val_split
 
-    # CLAP targets are only needed for validation, so only the val split loads them.
-    val_clap_dir = None
-    if cfg.clap_features_root:
-        candidate = Path(cfg.clap_features_root) / cfg.direction / cfg.val_split
+    # CLAP targets: val needs them for the cosine/retrieval metrics, and TRAIN needs them too
+    # once lambda_align > 0 (O2), where they are the auxiliary loss target. They were previously
+    # loaded for val only, which would have made the O2 guard below fire unconditionally.
+    def _clap_dir(split: str, required: bool) -> Path | None:
+        if not cfg.clap_features_root:
+            return None
+        candidate = Path(cfg.clap_features_root) / cfg.direction / split
         if (candidate / "clap_target.npy").exists():
-            val_clap_dir = candidate
-        else:
-            log(f"    NOTE: no CLAP targets at {candidate}; val cosine metric disabled.")
-            log("          Run scripts/precompute_clap_targets.py to enable it -- without it")
-            log("          the flat diffusion loss is the only signal, which is not enough.")
+            return candidate
+        msg = f"no CLAP targets at {candidate}"
+        if required:
+            raise SystemExit(
+                f"lambda_align={cfg.lambda_align} needs CLAP targets for the '{split}' split "
+                f"but {msg}.\n"
+                f"  Precompute them:  python scripts/precompute_clap_targets.py "
+                f"--direction {cfg.direction} --split {split}\n"
+                f"  Or set lambda_align: 0.0 to train the plain diffusion objective."
+            )
+        log(f"    NOTE: {msg}; val cosine/retrieval metrics disabled.")
+        log("          Run scripts/precompute_clap_targets.py to enable them -- without them")
+        log("          the flat diffusion loss is the only signal, which is not enough.")
+        return None
 
-    train_ds = S2ALatentDataset(train_dir, speech_seconds=cfg.speech_seconds)
+    val_clap_dir = _clap_dir(cfg.val_split, required=False)
+    train_clap_dir = _clap_dir(cfg.train_split, required=cfg.lambda_align > 0.0)
+
+    train_ds = S2ALatentDataset(
+        train_dir, speech_seconds=cfg.speech_seconds, clap_dir=train_clap_dir
+    )
     val_ds = S2ALatentDataset(
         val_dir, speech_seconds=cfg.speech_seconds, clap_dir=val_clap_dir
     )
     log(f"train: {len(train_ds)} | val: {len(val_ds)} | latent shape {train_ds.latent_shape}")
-    log(f"val CLAP cosine metric: {'ON' if val_clap_dir else 'OFF'}")
+    log(f"val CLAP metrics (cos + retrieval r1/r5): {'ON' if val_clap_dir else 'OFF'}")
+    log(f"train CLAP targets (for O2 alignment):    {'ON' if train_clap_dir else 'OFF'}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True) if world_size > 1 else None
     train_loader = DataLoader(
@@ -432,7 +493,8 @@ def main() -> int:
         train: bool,
         timesteps: torch.Tensor | None = None,
         cond: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_extras: bool = False,
+    ):
         """
         AudioLDM's objective: MSE between predicted and true noise in latent space.
 
@@ -481,27 +543,118 @@ def main() -> int:
         else:
             raise ValueError(f"unsupported prediction_type: {noise_scheduler.config.prediction_type}")
 
-        return F.mse_loss(pred.float(), target.float())
+        loss = F.mse_loss(pred.float(), target.float())
+        if not return_extras:
+            return loss
+
+        # ------------------------------------------------------------------ x0-space error
+        # WHY: eps-MSE is flat by construction. Measured bucket losses 0.559/0.169/0.024/0.001
+        # at t=125/375/625/875 track the schedule's SNR (1.84/0.61/0.19/0.036) almost perfectly
+        # inversely -- the number is dominated by "how much noise did we add", not by model
+        # quality. Recovering the implied clean latent x0-hat and scoring THAT undoes the
+        # scaling, so the same model error is comparable across timesteps and the metric can
+        # actually move. Free: pure arithmetic on tensors we already have.
+        #
+        #   x_t = sqrt(abar) * x0 + sqrt(1-abar) * eps
+        #   =>  x0_hat = (x_t - sqrt(1-abar) * eps_hat) / sqrt(abar)
+        extras = {}
+        with torch.no_grad():
+            ac = noise_scheduler.alphas_cumprod.to(device=latents.device, dtype=torch.float32)
+            ab = ac[timesteps].view(-1, *([1] * (latents.dim() - 1)))
+            eps_hat = pred.float() if noise_scheduler.config.prediction_type == "epsilon" else None
+            if eps_hat is not None:
+                x0_hat = (noisy.float() - (1 - ab).sqrt() * eps_hat) / ab.sqrt().clamp(min=1e-8)
+                # Relative, so it is comparable across timesteps and across runs whose latent
+                # scale differs. Clamped because at t->T, x0_hat explodes and the raw number
+                # would be meaningless rather than informative.
+                # CAVEAT, measured: for a FIXED model error this metric GROWS with t (0.63 at
+                # t=125 rising to 1587 at t=875), because dividing by sqrt(abar) amplifies the
+                # error as abar -> 0. That is the exact mirror of eps-MSE's problem rather than a
+                # cure for it: averaged over random t, x0 error is dominated by high-noise
+                # samples just as eps-MSE is dominated by low-noise ones. Clamped so it cannot
+                # explode, but read it as a complementary view, NOT as a fixed loss. The metrics
+                # to actually trust here are val_clap_r1 (real chance baseline) and D1/D2.
+                num = (x0_hat - latents.float()).flatten(1).pow(2).sum(1)
+                den = latents.float().flatten(1).pow(2).sum(1).clamp(min=1e-8)
+                extras["x0_rel_mse"] = (num / den).clamp(max=1e4).mean()
+        return loss, extras
 
     def diffusion_loss_at_timestep(
         batch, timesteps: torch.Tensor, cond: torch.Tensor | None = None
     ) -> torch.Tensor:
         return diffusion_loss(batch, train=False, timesteps=timesteps, cond=cond)
 
+    @torch.no_grad()
+    def diagnose(batch, timesteps: torch.Tensor, cond: torch.Tensor) -> tuple[float, float]:
+        """
+        D1 and D2 for one batch at one timestep, with the noise held fixed.
+
+        CRITICAL CONTROL: all three variants (correct / shuffled / null) must see the SAME
+        latent draw and the SAME noise. Calling the ordinary loss three times would resample
+        both, and the differences would be resampling noise rather than the effect of
+        conditioning -- which is precisely the mistake that would make this metric useless.
+        So the noising is done once here instead of being delegated.
+
+        Returns (d1_delta, d2_relative_gap):
+          d1_delta = loss(shuffled) - loss(correct).  > 0 => sample-specific info is used.
+          d2_gap   = ||eps(c) - eps(null)|| / ||eps(c)||.  ~0 => condition has no influence.
+        """
+        n = cond.shape[0]
+        mean = batch["latent_mean"].to(device, non_blocking=True)
+        std = batch["latent_std"].to(device, non_blocking=True)
+        latents = (mean + std * torch.randn_like(std)) * train_ds.vae_scaling_factor
+        noise = torch.randn_like(latents)            # ONE draw, shared by all three variants
+        noisy = noise_scheduler.add_noise(latents, noise, timesteps)
+
+        # Random n-cycle: a guaranteed derangement, so no sample keeps its own condition.
+        # A plain randperm leaves fixed points, which dilutes D1 toward zero. Patching fixed
+        # points in place is NOT valid -- it can duplicate indices (a bug caught earlier).
+        order = torch.randperm(n, device=device)
+        perm = torch.empty_like(order)
+        perm[order] = order.roll(-1)
+
+        def eps(c):
+            return unet(noisy, timesteps, encoder_hidden_states=None, class_labels=c).sample
+
+        e_c = eps(cond)
+        e_s = eps(cond[perm])
+        e_n = eps(conditioner_module.null_condition(n, device))
+
+        d1 = (F.mse_loss(e_s.float(), noise.float()) - F.mse_loss(e_c.float(), noise.float())).item()
+        denom = e_c.float().flatten(1).norm(dim=1).clamp(min=1e-8)
+        d2 = ((e_c - e_n).float().flatten(1).norm(dim=1) / denom).mean().item()
+        return d1, d2
+
     buckets = timestep_buckets(noise_scheduler.config.num_train_timesteps, 4)
 
     @torch.no_grad()
-    def validate(with_buckets: bool = True) -> dict:
+    def validate(with_buckets: bool = True, with_diag: bool = False) -> dict:
         """
         Validation with metrics that actually move.
 
         The global diffusion loss is flat by construction, so it is reported but not relied
         on. The informative numbers are:
-          - clap_cos: cosine between the conditioner output and the CLAP embedding of the
-            TRUE target clip. Directly measures whether the model is learning to point at
-            the right scene.
-          - loss_t<lo>_<hi>: loss restricted to a timestep band. Conditioning matters most
-            at low noise, where the global average drowns it out.
+          - clap_r1 / clap_r5: RETRIEVAL accuracy in CLAP space. Given a batch of conditioner
+            outputs and the CLAP embeddings of their true targets, is the correct target the
+            nearest neighbour? This is the single best cheap metric we have, and it is free
+            (pure arithmetic, no extra U-Net pass). Unlike raw cosine it is scale-free and has
+            an unambiguous chance baseline of 1/batch_size, so a number above chance is
+            evidence rather than something to compare against a hand-computed band. Raw cosine
+            sat at -0.02 inside a +/-0.044 chance band for 91 epochs and told us nothing.
+          - d1_delta: loss with the conditioning SHUFFLED minus loss with the correct
+            conditioning, at a fixed low timestep. > 0 means the model is using WHICH
+            utterance it was given. This is the number eps-MSE cannot give us, and logging it
+            per-epoch turns the central open question into a curve.
+          - d2_gap: ||eps(c) - eps(null)|| / ||eps(c)||. ~0 means the condition has no
+            influence at all and CFG is a no-op.
+          - x0_rel_mse: error in CLEAN-LATENT space rather than noise space, which removes the
+            SNR scaling that makes eps-MSE flat.
+          - loss_t<lo>_<hi>: loss restricted to a timestep band.
+
+        Deliberately NOT here: target_caption_clap_score and FAD. Both need full sampling
+        (50 DDIM steps + VAE decode + vocoder), which would dwarf a 2.16 min epoch. Worse,
+        under O2 a CLAP-based score partly measures our own training objective, so it must
+        never become the selection criterion. They belong in held-out eval, not in the loop.
         """
         conditioner.eval()
         if not cfg.freeze_unet:
@@ -509,8 +662,14 @@ def main() -> int:
 
         total, count = 0.0, 0
         cos_sum, cos_count = 0.0, 0
+        r1_sum, r5_sum, r_count = 0.0, 0.0, 0
+        x0_sum, x0_count = 0.0, 0
+        d1_sum, d2_sum, d_count = 0.0, 0.0, 0
         bucket_sum = [0.0] * len(buckets)
         bucket_count = [0] * len(buckets)
+        # Conditioning matters most where signal survives, so diagnose at a low timestep
+        # rather than at the average over all t (where it is drowned out).
+        diag_t = (buckets[0][0] + buckets[0][1]) // 2
 
         for batch in val_loader:
             n = batch["speech"].shape[0]
@@ -521,16 +680,39 @@ def main() -> int:
             with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
                 cond = compute_condition(batch)
 
-                loss = diffusion_loss(batch, train=False, cond=cond)
+                loss, extras = diffusion_loss(
+                    batch, train=False, cond=cond, return_extras=True
+                )
                 total += loss.item() * n
                 count += n
+                if "x0_rel_mse" in extras:
+                    x0_sum += extras["x0_rel_mse"].item() * n
+                    x0_count += n
 
                 if "clap_target" in batch:
-                    tgt = batch["clap_target"].to(device)
+                    tgt = F.normalize(batch["clap_target"].to(device).float(), dim=-1)
                     # Both sides are L2-normalized, so this is a plain dot product.
-                    cos = (cond.float() * F.normalize(tgt.float(), dim=-1)).sum(-1)
+                    cos = (cond.float() * tgt).sum(-1)
                     cos_sum += cos.sum().item()
                     cos_count += n
+
+                    # Retrieval within the batch: does cond point at its OWN target more than
+                    # at the other targets present? Needs n >= 2 to mean anything.
+                    if n >= 2:
+                        sim = cond.float() @ tgt.t()              # (n, n)
+                        truth = torch.arange(n, device=device)
+                        rank = (sim > sim.gather(1, truth[:, None])).sum(1)  # 0 = best
+                        r1_sum += (rank == 0).sum().item()
+                        r5_sum += (rank < min(5, n)).sum().item()
+                        r_count += n
+
+                # ------------------------------------------------- D1 / D2 (extra passes)
+                if with_diag and n >= 2:
+                    ts = torch.full((n,), diag_t, device=device, dtype=torch.long)
+                    d1, d2 = diagnose(batch, ts, cond)
+                    d1_sum += d1 * n
+                    d2_sum += d2 * n
+                    d_count += n
 
                 # Fixed timestep per bucket, so epoch-to-epoch comparisons are not
                 # dominated by timestep resampling noise. Skipped on most epochs because
@@ -551,8 +733,10 @@ def main() -> int:
         # when ranks get unequal numbers of samples.
         if dist.is_initialized():
             packed = torch.tensor(
-                [total, float(count), cos_sum, float(cos_count)] + bucket_sum
-                + [float(c) for c in bucket_count],
+                [total, float(count), cos_sum, float(cos_count),
+                 r1_sum, r5_sum, float(r_count), x0_sum, float(x0_count),
+                 d1_sum, d2_sum, float(d_count)]
+                + bucket_sum + [float(c) for c in bucket_count],
                 device=device,
                 dtype=torch.float64,
             )
@@ -560,12 +744,26 @@ def main() -> int:
             vals = packed.tolist()
             nb = len(buckets)
             total, count, cos_sum, cos_count = vals[0], int(vals[1]), vals[2], int(vals[3])
-            bucket_sum = vals[4 : 4 + nb]
-            bucket_count = [int(c) for c in vals[4 + nb : 4 + 2 * nb]]
+            r1_sum, r5_sum, r_count = vals[4], vals[5], int(vals[6])
+            x0_sum, x0_count = vals[7], int(vals[8])
+            d1_sum, d2_sum, d_count = vals[9], vals[10], int(vals[11])
+            bucket_sum = vals[12 : 12 + nb]
+            bucket_count = [int(c) for c in vals[12 + nb : 12 + 2 * nb]]
 
         out = {"val_loss": total / max(count, 1)}
         if cos_count:
             out["val_clap_cos"] = cos_sum / cos_count
+        if r_count:
+            out["val_clap_r1"] = r1_sum / r_count
+            out["val_clap_r5"] = r5_sum / r_count
+            # Chance depends on batch size, so record it -- otherwise the number is
+            # uninterpretable in isolation and in a W&B chart months from now.
+            out["val_clap_r1_chance"] = 1.0 / cfg.batch_size
+        if x0_count:
+            out["val_x0_rel_mse"] = x0_sum / x0_count
+        if d_count:
+            out["val_d1_delta"] = d1_sum / d_count
+            out["val_d2_gap"] = d2_sum / d_count
         if with_buckets:
             for bi, (lo, hi) in enumerate(buckets):
                 out[f"val_loss_t{lo}_{hi}"] = bucket_sum[bi] / max(bucket_count[bi], 1)
@@ -624,6 +822,7 @@ def main() -> int:
     global_step = 0
     history: list[dict] = []
     best_val = float("inf")
+    best_sel = -float("inf") if cfg.select_metric in _HIGHER_IS_BETTER else float("inf")
 
     if cfg.resume_from:
         ckpt_path = Path(cfg.resume_from)
@@ -659,6 +858,14 @@ def main() -> int:
             vals = [h["val_loss"] for h in history if h.get("val_loss") is not None]
             if vals:
                 best_val = min(vals)
+            # Restore the SELECTION metric's best too. Without this a resumed run starts from
+            # +/-inf and overwrites checkpoint_best on its very first validation, silently
+            # discarding a genuinely better earlier epoch.
+            sels = [h[cfg.select_metric] for h in history
+                    if h.get(cfg.select_metric) is not None]
+            if sels:
+                best_sel = (max(sels) if cfg.select_metric in _HIGHER_IS_BETTER else min(sels))
+                log(f"    restored best {cfg.select_metric}={best_sel:.5f} from history")
             log(f"    loaded {len(history)} prior epochs from history.json "
                 f"(best val {best_val:.4f})")
 
@@ -690,6 +897,22 @@ def main() -> int:
         log(f"nothing to do: start_epoch={start_epoch} >= epochs={cfg.epochs}. "
             "Raise `epochs` to continue training.")
 
+    # O2. Guarded so a config that asks for alignment but has no CLAP targets precomputed fails
+    # loudly here instead of silently training the plain objective for hours and looking fine.
+    lam_align = float(cfg.lambda_align)
+    if lam_align > 0.0:
+        if train_ds.clap_target is None:
+            raise SystemExit(
+                "lambda_align > 0 but the training set has no clap_target features. "
+                "Run scripts/precompute_clap_targets.py for the train split, or set "
+                "lambda_align: 0.0."
+            )
+        log(f"O2 alignment loss ACTIVE: lambda={lam_align} on (1 - cos), "
+            f"warmup={cfg.align_warmup_steps} steps")
+        log(f"    scale reference: diffusion loss ~0.198, (1-cos) ~1.0 at init, so the "
+            f"alignment term starts ~{lam_align/0.198:.1f}x the diffusion term")
+    last_align, last_dm = None, None
+
     for epoch in range(start_epoch, cfg.epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -699,7 +922,26 @@ def main() -> int:
 
         for batch in train_loader:
             with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
-                loss = diffusion_loss(batch, train=True)
+                if lam_align > 0.0 and "clap_target" in batch:
+                    # Compute the condition ONCE and share it. The alignment term must see the
+                    # PRE-dropout condition: CFG dropout replaces some rows with the null
+                    # embedding, and pulling a deliberately-nulled row toward a real target
+                    # would train the null embedding to encode that sample's scene, which
+                    # corrupts both the unconditional branch and CFG at inference.
+                    cond_raw = compute_condition(batch)
+                    loss_dm = diffusion_loss(batch, train=True, cond=cond_raw)
+                    tgt = F.normalize(batch["clap_target"].to(device).float(), dim=-1)
+                    # Both sides are unit vectors, so this is 1 - cosine, bounded [0, 2].
+                    align = (1.0 - (cond_raw.float() * tgt).sum(-1)).mean()
+                    lam = lam_align
+                    if cfg.align_warmup_steps > 0:
+                        lam = lam_align * min(1.0, global_step / cfg.align_warmup_steps)
+                    loss = loss_dm + lam * align
+                    last_align = align.item()
+                    last_dm = loss_dm.item()
+                else:
+                    loss = diffusion_loss(batch, train=True)
+                    last_align, last_dm = None, loss.item()
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -762,19 +1004,50 @@ def main() -> int:
                 cfg.bucket_every_epochs > 0
                 and ((epoch + 1) % cfg.bucket_every_epochs == 0 or epoch == start_epoch or stop)
             )
-            metrics = validate(with_buckets=want_buckets)
+            want_diag = (
+                cfg.diag_every_epochs > 0
+                and ((epoch + 1) % cfg.diag_every_epochs == 0 or epoch == start_epoch or stop)
+            )
+            metrics = validate(with_buckets=want_buckets, with_diag=want_diag)
             val_loss = metrics["val_loss"]
             cos = metrics.get("val_clap_cos")
             log(f"  epoch {epoch:02d} train={train_loss:.4f} val={val_loss:.4f}"
                 + (f" clap_cos={cos:+.4f}" if cos is not None else "")
+                + (f" r1={metrics['val_clap_r1']:.3f}/{metrics['val_clap_r1_chance']:.3f}"
+                   if "val_clap_r1" in metrics else "")
+                + (f" x0={metrics['val_x0_rel_mse']:.4f}" if "val_x0_rel_mse" in metrics else "")
+                + (f" align={last_align:.4f}" if last_align is not None else "")
                 + f" ({(time.time()-t_epoch)/60:.1f} min)")
-            log("      buckets: " + "  ".join(
-                f"{k.replace('val_loss_t','t')}={v:.4f}"
-                for k, v in metrics.items() if k.startswith("val_loss_t")
-            ))
-            if val_loss < best_val:
-                best_val = val_loss
+            if "val_d1_delta" in metrics:
+                # The two numbers that decide whether any of this is working.
+                log(f"      D1 delta={metrics['val_d1_delta']:+.5f}  "
+                    f"D2 gap={metrics['val_d2_gap']:.5f}   "
+                    f"(D1>0 => uses WHICH utterance; D2~0 => ignores the condition entirely)")
+            if want_buckets:
+                log("      buckets: " + "  ".join(
+                    f"{k.replace('val_loss_t','t')}={v:.4f}"
+                    for k, v in metrics.items() if k.startswith("val_loss_t")
+                ))
+
+            # Model selection. Selecting on val_loss is KNOWN BROKEN for this task: over 91
+            # epochs val loss was 0.1979 +/- 0.0070 with no trend, and the "best" 0.1833 matched
+            # the expected minimum of 91 draws from that distribution (0.1805). It was selecting
+            # noise, so `checkpoint_best` was effectively a random epoch. Prefer a metric with a
+            # real chance baseline; `select_metric` names it and higher-is-better is inferred.
+            sel_key = cfg.select_metric
+            sel = metrics.get(sel_key)
+            if sel is None:
+                if sel_key != "val_loss":
+                    log(f"      WARNING: select_metric='{sel_key}' not in metrics this epoch; "
+                        f"falling back to val_loss for selection")
+                sel_key, sel = "val_loss", val_loss
+            higher_better = sel_key in _HIGHER_IS_BETTER
+            improved = (sel > best_sel) if higher_better else (sel < best_sel)
+            if improved:
+                best_sel = sel
+                best_val = min(best_val, val_loss)
                 save_checkpoint("best", epoch, global_step, val_loss)
+                log(f"      new best by {sel_key}={sel:.5f} -> checkpoint_best")
         else:
             log(f"  epoch {epoch:02d} train={train_loss:.4f} ({(time.time()-t_epoch)/60:.1f} min)")
 
@@ -786,6 +1059,12 @@ def main() -> int:
             "epoch_minutes": (time.time() - t_epoch) / 60,
             **{k: v for k, v in metrics.items() if k != "val_loss"},
         }
+        if last_align is not None:
+            # Logged separately from train_loss, which is now their SUM. Without the split it is
+            # impossible to tell from a curve whether the diffusion term improved or the
+            # alignment term simply dominated the total.
+            record["train_align"] = last_align
+            record["train_diffusion"] = last_dm
         history.append(record)
         if is_main():
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))
@@ -793,6 +1072,8 @@ def main() -> int:
             wandb_run.log(
                 {
                     "train/epoch_loss": train_loss,
+                    **({"train/align": last_align, "train/diffusion": last_dm}
+                       if last_align is not None else {}),
                     **{f"val/{k.replace('val_', '')}": v for k, v in metrics.items()},
                     "epoch": epoch,
                     "epoch_minutes": record["epoch_minutes"],

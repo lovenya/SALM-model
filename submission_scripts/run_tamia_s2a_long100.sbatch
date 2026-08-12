@@ -18,6 +18,16 @@
 # Usage:
 #   sbatch submission_scripts/run_tamia_s2a_long100.sbatch
 #   ARCH=s2a_audioldm_whisper_mean_linear RUN_NAME=long100_L0 sbatch ...   # another rung
+#
+#   # extra exp overlays, appended AFTER long100.yaml so they win:
+#   ARCH=s2a_audioldm_whisper_mean_linear RUN_NAME=long100_L0f \
+#     EXTRA=configs/exp/frozen_unet.yaml sbatch ...                       # frozen U-Net
+#   ARCH=s2a_audioldm_whisper_xformer RUN_NAME=long100_L2_o2 \
+#     EXTRA=configs/exp/o2_align.yaml sbatch ...                          # O2 alignment loss
+#
+# RUN_NAME must be unique per experiment: the run dir is $RUNS_ROOT/$ARCH/$RUN_NAME and
+# auto-resume keys off checkpoint_last.pt inside it. Reusing a name across two DIFFERENT
+# configs would silently resume one experiment into the other.
 #SBATCH --job-name=salm-s2a-long100
 #SBATCH --account=aip-ravanelm
 #SBATCH --nodes=1
@@ -96,8 +106,17 @@ else
     echo "fresh start (no checkpoint_last.pt in $RUN_DIR/checkpoints)"
 fi
 
+# Extra exp overlays, space-separated, appended last so they override long100.yaml.
+# Validated here rather than letting torchrun fail 30 s in with a confusing traceback.
+read -r -a EXTRA_CONFIGS <<< "${EXTRA:-}"
+for f in ${EXTRA_CONFIGS[@]+"${EXTRA_CONFIGS[@]}"}; do
+    [[ -f "$REPO/$f" ]] || { echo "ERROR: EXTRA config not found: $REPO/$f" >&2; exit 1; }
+    echo "extra config: $f"
+done
+
 torchrun --nproc_per_node=4 --master_port=29541 -m salm.train_ldm \
     --config configs/base/s2a_audioldm.yaml "configs/arch/${ARCH}.yaml" configs/exp/long100.yaml \
+        ${EXTRA_CONFIGS[@]+"${EXTRA_CONFIGS[@]}"} \
     --override \
         "run_name=$RUN_NAME" \
         "arch=$ARCH" \
