@@ -12,6 +12,25 @@ account, environment, and dependencies are clear.
 
 Run IDs use Montreal time: `TZ=America/Toronto date +%Y%m%d_%H%M`.
 
+## HARD RULE, above everything else in this file
+
+**Never run `sbatch`, `scancel`, `scontrol update/requeue`, or any other job-mutating
+command unless the user explicitly asked for it in that message, for that job.**
+
+Approval is per-action and never standing. An approved plan that mentions launching jobs is
+NOT permission to cancel or relaunch anything later. This holds even when the running job is
+clearly broken, or a fix would obviously make it faster — losing queued position and
+in-progress compute is the user's decision, because they own the allocation and the
+deadlines riding on it.
+
+Instead: state the situation and the trade-off, hand over the exact command, and wait.
+
+Violated on 2026-08-12 (job `406278` cancelled by the agent to apply a perf fix), which is
+why this sits at the top of the file.
+
+Read-only inspection is always allowed: `squeue`, `sacct`, `sinfo`, `sshare`,
+`scontrol show`, and `sbatch --test-only` (queues nothing).
+
 ## Hard rules
 
 - Login nodes are for editing, metadata inspection, and submission only. All GPU

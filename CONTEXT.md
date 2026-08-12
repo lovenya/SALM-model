@@ -1,5 +1,10 @@
 # Context (for agents and developers)
 
+> **Job control is the user's, not the agent's.** Never `sbatch`/`scancel`/`scontrol` without
+> explicit per-action instruction. See `CLAUDE.md` -- this was violated once (job 406278 was
+> cancelled by the agent) and the rule is now written down in three places.
+
+
 This file is the internal working doc for this repo. It is NOT the public
 README -- keep cluster paths, in-progress decisions, and open questions here.
 Update it via the `/update-docs` skill after every meaningful milestone.
