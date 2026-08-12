@@ -258,3 +258,44 @@ Nothing here is a result yet; these are the numbers we are waiting on.
   `model_capabilities.json`.
 - **The ladder**: L0 `mean_linear` (0.66M) / L1 `attn_mlp` (7.1M) vs L2 `xformer` (32.3M) at matched
   `epochs` and `lr_total_steps`.
+
+## Measured 2026-08-12: our actual scale, and why it reframes the problem
+
+Asked "is our training set too small?", so I measured it instead of repeating the 15k figure.
+
+| quantity | value |
+|---|---|
+| train pairs | **15,033** |
+| val pairs | 1,887 |
+| ambient audio | **42.76 h** (15,033 × 10.24 s) |
+| unique `audio_file` | 15,033 — every target clip distinct |
+| unique `speech_text` | 14,792 |
+| **unique `audio_cap`** | **13,959** |
+| **pairs per unique scene** | **1.1** |
+
+**The 1.1 is the number that matters, and it is worse than "15k examples".** This is not 15,033
+examples of a mapping — it is essentially **one example per scene**. The most frequent caption
+("A person snoring") appears 29 times; the distribution is almost entirely singletons.
+
+Comparisons: V2A-Mapper trained on 183,730 pairs (12×). Foley Control uses ~700k clips (46×) and is
+the one precedent that succeeds on the diffusion loss *alone*. Latent CLAP Loss worked at AudioCaps
+scale (~50k). DCASE 2023 Task 7 was ~5.4 h but *class-conditional* — 7 classes with hundreds of
+examples each, a fundamentally easier learning problem than ours despite less audio.
+
+**Two conclusions, and the second is the useful one:**
+
+1. For the diffusion loss alone to teach a 32 M conditioner a semantic mapping, 42 h at 1.1
+   pairs/scene is plausibly too little. This is exactly the regime where the field uses a direct
+   embedding target (V2A-Mapper) or contrastive pretraining (Diff-Foley), and only relies on the
+   diffusion loss alone at 700k+ clips.
+2. **But "get more data" is probably the wrong fix.** At ~1 pair per scene the task is close to
+   one-shot per scene, so the constraint is *supervision density per example*, not example count.
+   That is precisely what O2 (λ=2000 auxiliary CLAP loss) adds and what the diffusion loss lacks.
+   This strengthens the O2 recommendation on independent grounds.
+
+**Side finding — the emotion experiment is smaller than advertised.** `speaker_emotion` has 47
+distinct values but is brutally long-tailed: neutral 8,082 / happy 3,163 / angry 2,777, then
+everything else in single or double digits, with many free-text variants ("neutral with mild
+frustration", "startled then neutral", "cheerful but frustrated"). The
+emotion-at-matched-transcript experiment therefore has **~3 usable classes, not 47**, and needs
+label normalisation first.
