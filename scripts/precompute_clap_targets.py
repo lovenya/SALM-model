@@ -116,7 +116,7 @@ def main() -> int:
                 librosa.resample(w, orig_sr=16000, target_sr=CLAP_SR, res_type="soxr_hq")
             )
 
-        inputs = processor(audios=wavs, sampling_rate=CLAP_SR, return_tensors="pt")
+        inputs = processor(audio=wavs, sampling_rate=CLAP_SR, return_tensors="pt")
         inputs = {k: v.to(args.device) for k, v in inputs.items()}
         with torch.no_grad():
             feats = model.get_audio_features(**inputs)

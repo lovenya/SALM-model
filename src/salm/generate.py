@@ -98,34 +98,39 @@ class ClapAudioEncoder:
             librosa.resample(w, orig_sr=AUDIOLDM_SR, target_sr=self.SR, res_type="soxr_hq")
             for w in wavs_16k
         ]
-        inputs = self.processor(audios=wavs_48k, sampling_rate=self.SR, return_tensors="pt")
+        inputs = self.processor(audio=wavs_48k, sampling_rate=self.SR, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         feats = self.model.get_audio_features(**inputs)
         return F.normalize(feats, dim=-1)
 
 
 def load_s2a_checkpoint(checkpoint: Path, device: str):
-    """Restore the trained mapper (and finetuned U-Net weights, if present)."""
-    from salm.encoders.whisper_encoder import WhisperSpeechEncoder
-    from salm.mapper import SpeechToClapMapper
+    """
+    Restore the trained conditioner (and finetuned U-Net weights, if present).
+
+    The architecture is rebuilt through the registry using the `arch` recorded in the
+    checkpoint's own config, so any rung of the ladder loads without this function knowing
+    which conditioner was used. An earlier version hardcoded the transformer mapper and
+    would silently fail to load an L0/L1/L3 checkpoint.
+    """
+    from salm.architectures import build as build_arch
 
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     cfg = payload["config"]
+    arch = cfg.get("arch", "s2a_audioldm_whisper_xformer")
+    output_dim = payload["mapper"]["null_embedding"].shape[0]
     log(f"    checkpoint epoch={payload.get('epoch')} val_loss={payload.get('val_loss')}")
+    log(f"    arch={arch} cond_dim={output_dim}")
 
-    encoder = WhisperSpeechEncoder(
-        cfg.get("whisper_path", str(project_paths.WHISPER_LARGE_V3_PATH)),
-        dtype=torch.float16,
-        device=device,
-    )
-    mapper = SpeechToClapMapper(
-        input_dim=encoder.feature_dim,
-        output_dim=payload["mapper"]["null_embedding"].shape[0],
-        hidden_dim=cfg.get("mapper_hidden_dim", 1024),
-        num_layers=cfg.get("mapper_layers", 2),
-        dropout=0.0,
-    ).to(device)
-    mapper.load_state_dict(payload["mapper"])
+    # dropout off at inference; the saved value would otherwise perturb sampling.
+    cfg = {**cfg, "mapper_dropout": 0.0}
+    components = build_arch(arch, cfg, torch.device(device), output_dim=output_dim)
+    encoder = components.encoder
+    mapper = components.conditioner
+
+    # Snapshots are saved in fp16, so cast back to the module's dtype before loading.
+    state = {k: v.float() if v.is_floating_point() else v for k, v in payload["mapper"].items()}
+    mapper.load_state_dict(state)
     mapper.eval()
 
     return encoder, mapper, payload
