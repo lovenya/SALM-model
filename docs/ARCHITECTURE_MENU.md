@@ -108,6 +108,33 @@ zero-parameter option available to us. It doubles as the E4 control — if a fro
 speech carries no scene information, this row should be near-unconditional, which is the cheap way to
 substantiate the CLAP-on-speech claim we have so far only asserted.
 
+### T0 is a different axis, not a sixth rung
+
+Built 2026-08-12 (`configs/arch/s2a_t0_whisper_regress.yaml`, `salm.train_regress`). It is tempting
+to file T0 at the bottom of the table above; that would be wrong. The six rungs vary **conditioner
+capacity while holding diffusion fixed**. T0 varies the **generative process** and is nearly
+orthogonal:
+
+| | trainable params | generative process |
+|---|---|---|
+| L− | 0 | diffusion (50 steps) |
+| L0 … L2 | 0.66 M … 32.28 M | diffusion (50 steps) |
+| **T0** | **9.26 M** | **none — one forward pass, MSE on the latent** |
+
+So T0 is not "simpler than L−" on one scale; it is a different question. L− asks *does the
+conditioning need to be learned?* T0 asks *does the generation need to be stochastic?* Both are
+reviewer questions and neither substitutes for the other.
+
+What T0 is designed to produce is one number, `val_std_ratio`. Measured on our train latents: a
+single real latent has std 1.032, a blend of 2 gives 0.753, a blend of 16 gives 0.421, and
+AudioLDM's decoder expects ~1.0. If regression lands near 0.5 while diffusion stays near 1.0, the
+variance collapse is measured rather than argued. It also gives us the **latency floor** — one
+forward pass versus 50 denoising steps — which is a primary number given the efficiency claim.
+
+Deliberately NOT justified by "the task is one-to-many": our pairing is 1:1 (15,033 speech clips,
+15,033 distinct targets), so nothing forces averaging during training. The claim is about
+latent-space geometry at generalisation time. See `EXPERIMENT_LOG.md`.
+
 **Do not run all six.** Endpoints first (L− and L2 are both already done or in flight; add L0 and
 L0f), and fill in the interior rungs *only if the endpoints differ*. If L0 ≈ L2 the story is finished —
 complexity bought nothing — and L1/L3 add no information for ~29 GPU-h. If L0 ≪ L2, then L1 and L3
