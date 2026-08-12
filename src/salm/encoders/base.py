@@ -29,7 +29,7 @@ class FrozenEncoder(ABC, torch.nn.Module):
     @property
     @abstractmethod
     def feature_dim(self) -> int:
-        """D in the (B, T_feat, D) output -- the mapper's input width."""
+        """D in the (B, T_feat, D) output -- the conditioner's input width."""
 
     @abstractmethod
     def forward(self, wav_16k: torch.Tensor) -> torch.Tensor:

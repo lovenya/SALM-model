@@ -12,9 +12,9 @@ val_split: val
 speech_seconds: 16.0          # covers the observed TTAS max (~16.1 s) without truncation
 
 encoder: whisper
-mapper_hidden_dim: 1024
-mapper_layers: 2
-mapper_dropout: 0.1
+cond_hidden_dim: 1024
+cond_layers: 2
+cond_dropout: 0.1
 
 # 16 per GPU x 4 GPUs = effective 64. AudioLDM-S latents are small, so this fits
 # comfortably on H100s and leaves room for the frozen Whisper encoder.
@@ -31,7 +31,7 @@ epochs: 20
 # The U-Net is pretrained and the mapper is not, so they get very different rates.
 # Too high an LR on the U-Net erases AudioLDM's prior, which is the main thing we
 # are borrowing.
-lr_mapper: 1.0e-4
+lr_conditioner: 1.0e-4
 lr_unet: 1.0e-5
 weight_decay: 1.0e-2
 warmup_steps: 300

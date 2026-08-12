@@ -8,7 +8,7 @@ comparison is meaningless.
 
 Whisper always pads its input to a fixed 30 s mel window, giving 1500 encoder frames
 regardless of the true utterance length. TTAS speech averages ~4.9 s, so most of those
-frames are padding. We return the whole sequence plus a validity mask so the mapper can
+frames are padding. We return the whole sequence plus a validity mask so the conditioner can
 attention-pool over real content instead of averaging in silence.
 """
 
@@ -78,11 +78,22 @@ class WhisperSpeechEncoder(FrozenEncoder):
 
     @torch.no_grad()
     def encode_with_mask(
-        self, wav_16k: torch.Tensor, lengths_samples: torch.Tensor
+        self, wav_16k: torch.Tensor, lengths_samples: torch.Tensor, truncate: bool = True
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Same as forward, plus a (B, 1500) bool mask marking frames backed by real audio
-        rather than Whisper's 30 s zero padding.
+        Same as forward, plus a bool mask marking frames backed by real audio rather than
+        Whisper's 30 s zero padding.
+
+        With `truncate` (the default) the returned sequence is cut to the longest REAL
+        utterance in the batch instead of the full 1500 frames. Whisper always emits 1500
+        frames (one per 20 ms of its fixed 30 s window) while TTAS speech averages 4.9 s
+        (~245 frames), so ~84% of the sequence is encoded silence. The mask already excluded
+        it from pooling, but the conditioner's self-attention still paid O(T^2) for it.
+        Trimming is mathematically neutral -- those positions were masked everywhere they
+        were consumed -- and cuts the conditioner's attention cost several-fold.
+
+        The encoder itself still processes all 1500 frames; that cost is inside Whisper's
+        fixed-window design and cannot be avoided without changing its feature extractor.
         """
         feats = self.forward(wav_16k)
         b, t, _ = feats.shape
@@ -93,4 +104,11 @@ class WhisperSpeechEncoder(FrozenEncoder):
         )
         idx = torch.arange(t, device=feats.device).unsqueeze(0).expand(b, t)
         mask = idx < valid_frames.unsqueeze(1)
+
+        if truncate:
+            # At least 1 frame, so an all-silent batch cannot produce a zero-length sequence.
+            keep = int(max(1, int(valid_frames.max().item())))
+            feats = feats[:, :keep, :]
+            mask = mask[:, :keep]
+
         return feats, mask

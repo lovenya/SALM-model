@@ -4,5 +4,5 @@
 # 30 s while TTAS speech averages 4.9 s, so pooling choice decides how much silence gets
 # averaged in.
 arch: s2a_audioldm_whisper_attn_mlp
-mapper_hidden_dim: 1024
-mapper_dropout: 0.1
+cond_hidden_dim: 1024
+cond_dropout: 0.1

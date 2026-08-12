@@ -4,7 +4,7 @@
 # specialise before the final projection, while still fitting AudioLDM's single-vector
 # conditioning interface.
 arch: s2a_audioldm_whisper_qformer
-mapper_hidden_dim: 1024
-mapper_num_queries: 8
-mapper_layers: 2
-mapper_dropout: 0.1
+cond_hidden_dim: 1024
+cond_num_queries: 8
+cond_layers: 2
+cond_dropout: 0.1

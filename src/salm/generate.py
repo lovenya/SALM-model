@@ -8,8 +8,8 @@ Modes:
   rung1  speech-> audio via CLAP AUDIO embedding of the speech, straight into frozen
                   AudioLDM. The control. Expect generic output, because CLAP encodes
                   "someone is speaking", not what they said -- confirming that is a
-                  result, and it is what motivates the mapper.
-  s2a    speech-> audio via a trained checkpoint (frozen encoder -> mapper -> U-Net).
+                  result, and it is what motivates the conditioner.
+  s2a    speech-> audio via a trained checkpoint (frozen encoder -> conditioner -> U-Net).
                   The actual model.
 
 All three share the same sampler, so differences come only from the conditioning vector.
@@ -113,7 +113,7 @@ def load_s2a_checkpoint(checkpoint: Path, device: str):
 
     The architecture is rebuilt through the registry using the `arch` recorded in the
     checkpoint's own config, so any rung of the ladder loads without this function knowing
-    which conditioner was used. An earlier version hardcoded the transformer mapper and
+    which conditioner was used. An earlier version hardcoded the transformer conditioner and
     would silently fail to load an L0/L1/L3 checkpoint.
     """
     from salm.architectures import build as build_arch
@@ -121,22 +121,25 @@ def load_s2a_checkpoint(checkpoint: Path, device: str):
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     cfg = payload["config"]
     arch = cfg.get("arch", "s2a_audioldm_whisper_xformer")
-    output_dim = payload["mapper"]["null_embedding"].shape[0]
+    # Checkpoints written before the mapper->conditioner rename use the "mapper" key.
+    cond_state = payload.get("conditioner") or payload["mapper"]
+    output_dim = cond_state["null_embedding"].shape[0]
     log(f"    checkpoint epoch={payload.get('epoch')} val_loss={payload.get('val_loss')}")
     log(f"    arch={arch} cond_dim={output_dim}")
 
-    # dropout off at inference; the saved value would otherwise perturb sampling.
-    cfg = {**cfg, "mapper_dropout": 0.0}
+    # Dropout off at inference; the saved value would otherwise perturb sampling. Both key
+    # spellings are set so a checkpoint saved before the rename still resolves.
+    cfg = {**cfg, "cond_dropout": 0.0, "mapper_dropout": 0.0}
     components = build_arch(arch, cfg, torch.device(device), output_dim=output_dim)
     encoder = components.encoder
-    mapper = components.conditioner
+    conditioner = components.conditioner
 
-    # Snapshots are saved in fp16, so cast back to the module's dtype before loading.
-    state = {k: v.float() if v.is_floating_point() else v for k, v in payload["mapper"].items()}
-    mapper.load_state_dict(state)
-    mapper.eval()
+    # Snapshots are saved in fp16, so cast back to float before loading.
+    state = {k: v.float() if v.is_floating_point() else v for k, v in cond_state.items()}
+    conditioner.load_state_dict(state)
+    conditioner.eval()
 
-    return encoder, mapper, payload
+    return encoder, conditioner, payload
 
 
 def main() -> int:
@@ -174,10 +177,10 @@ def main() -> int:
     log("Loading AudioLDM ...")
     pipe = load_pipeline(args.device, dtype)
 
-    encoder = mapper = clap = None
+    encoder = conditioner = clap = None
     if args.mode == "s2a":
         log("Loading trained checkpoint ...")
-        encoder, mapper, _payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
+        encoder, conditioner, _payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
     elif args.mode == "rung1":
         log("Loading CLAP audio tower (control) ...")
         clap = ClapAudioEncoder(args.device)
@@ -211,8 +214,8 @@ def main() -> int:
                         torch.from_numpy(padded).to(args.device),
                         torch.tensor(lengths),
                     )
-                    cond = mapper(feats, mask=mask)
-                    negative = mapper.null_condition(len(batch), torch.device(args.device))
+                    cond = conditioner(feats, mask=mask)
+                    negative = conditioner.null_condition(len(batch), torch.device(args.device))
 
         cond = cond.to(dtype=pipe.unet.dtype)
         if negative is not None:

@@ -7,7 +7,7 @@ pointless, so run this first.
   1. Do the weights load offline (no internet on compute nodes)?
   2. How is the U-Net actually conditioned? We expect a single global 512-d CLAP
      vector passed as `class_labels` with `encoder_hidden_states=None`. The whole
-     mapper design depends on this, so we assert it against the installed source
+     conditioner design depends on this, so we assert it against the installed source
      rather than trusting the paper.
   3. Is our mel extraction correct? Checked by round-tripping a REAL clip:
      wav -> mel -> vocoder -> wav. If the mel scale is wrong the vocoder output is
@@ -55,7 +55,7 @@ def check_conditioning_path(pipe) -> dict:
     """
     Confirm HOW the U-Net consumes the CLAP embedding.
 
-    We read the installed pipeline source instead of assuming, because the mapper's
+    We read the installed pipeline source instead of assuming, because the conditioner's
     output contract (one global vector vs. a token sequence) follows directly from it.
     """
     unet_cfg = pipe.unet.config

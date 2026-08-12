@@ -17,7 +17,7 @@ num_workers: 8
 
 # The U-Net is pretrained and the conditioner is not, so they get very different rates.
 # Too high an LR on the U-Net erases the audio prior, which is the main thing we borrow.
-lr_mapper: 1.0e-4
+lr_conditioner: 1.0e-4
 lr_unet: 1.0e-5
 weight_decay: 1.0e-2
 warmup_steps: 300

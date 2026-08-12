@@ -17,7 +17,7 @@ from typing import Callable
 import torch
 
 from salm.conditioners import AttnPoolMLP, MeanPoolLinear, QueryPoolMapper
-from salm.mapper import CLAP_EMBED_DIM, SpeechToClapMapper
+from salm.conditioners import CLAP_EMBED_DIM, XFormerConditioner
 
 
 @dataclass
@@ -56,22 +56,35 @@ def _cond_mean_linear(input_dim: int, output_dim: int, cfg: dict):
     return MeanPoolLinear(input_dim, output_dim)
 
 
+def _cfg_get(cfg: dict, key: str, default):
+    """
+    Read a conditioner setting, falling back to the pre-rename `mapper_*` spelling.
+
+    Checkpoints written before the rename embed their config with the old key names, and
+    generate.py rebuilds the architecture from that config.
+    """
+    if key in cfg:
+        return cfg[key]
+    legacy = key.replace("cond_", "mapper_", 1)
+    return cfg.get(legacy, default)
+
+
 def _cond_attn_mlp(input_dim: int, output_dim: int, cfg: dict):
     return AttnPoolMLP(
         input_dim,
         output_dim,
-        hidden_dim=cfg.get("mapper_hidden_dim", 1024),
-        dropout=cfg.get("mapper_dropout", 0.1),
+        hidden_dim=_cfg_get(cfg, "cond_hidden_dim", 1024),
+        dropout=_cfg_get(cfg, "cond_dropout", 0.1),
     )
 
 
 def _cond_xformer(input_dim: int, output_dim: int, cfg: dict):
-    return SpeechToClapMapper(
+    return XFormerConditioner(
         input_dim=input_dim,
         output_dim=output_dim,
-        hidden_dim=cfg.get("mapper_hidden_dim", 1024),
-        num_layers=cfg.get("mapper_layers", 2),
-        dropout=cfg.get("mapper_dropout", 0.1),
+        hidden_dim=_cfg_get(cfg, "cond_hidden_dim", 1024),
+        num_layers=_cfg_get(cfg, "cond_layers", 2),
+        dropout=_cfg_get(cfg, "cond_dropout", 0.1),
     )
 
 
@@ -79,10 +92,10 @@ def _cond_qformer(input_dim: int, output_dim: int, cfg: dict):
     return QueryPoolMapper(
         input_dim,
         output_dim,
-        hidden_dim=cfg.get("mapper_hidden_dim", 1024),
-        num_queries=cfg.get("mapper_num_queries", 8),
-        num_layers=cfg.get("mapper_layers", 2),
-        dropout=cfg.get("mapper_dropout", 0.1),
+        hidden_dim=_cfg_get(cfg, "cond_hidden_dim", 1024),
+        num_queries=_cfg_get(cfg, "cond_num_queries", 8),
+        num_layers=_cfg_get(cfg, "cond_layers", 2),
+        dropout=_cfg_get(cfg, "cond_dropout", 0.1),
     )
 
 

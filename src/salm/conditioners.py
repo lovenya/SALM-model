@@ -1,28 +1,33 @@
 """
 Conditioners: frozen encoder features -> one L2-normalized vector for AudioLDM.
 
-These are the rungs of the simple->complex ladder. Each changes exactly ONE thing from
-the previous, so a difference in results is attributable:
+Terminology (previously inconsistent -- "mapper", "xformer" and "conditioner" all referred
+to this): a **conditioner** turns the frozen encoder's frame sequence into the single vector
+that tells AudioLDM's U-Net *what* to generate, as distinct from the latent being generated.
+`conditioner` is the term used everywhere now; `mapper` is kept only as a deprecated alias so
+older checkpoints and configs still load.
 
-  L0 mean_linear   mean-pool + single linear        ~0.7M   is a linear probe enough?
-  L1 attn_mlp      attention-pool + MLP            ~5M     does learned pooling help?
-  L2 xformer       transformer + attention-pool    ~32M    does temporal modelling help?
-                   (lives in mapper.py, built first)
-  L3 qformer       k learned queries + MLP         ~35M    is one pooled vector the limit?
+Its whole job is (B, T, D_in) -> (B, 512): pool over time, project to width. Everything below
+is a different answer to "how much machinery does that pooling and projection need?", which
+is an open question -- Whisper has already contextualised the sequence, so extra temporal
+modelling here may be redundant, and 32M from-scratch params on 15k pairs is a lot for what
+is essentially a projection.
 
-Why start below L2: L2 was written first out of expedience, and at 15k training pairs it
-carries ~2,150 params per example. L0 beating it is a real possibility, and without the
-lower rungs we cannot tell whether that capacity earns anything.
+The ladder, simple -> complex. Each rung changes ONE thing so a difference is attributable:
 
-All variants share the same contract so the trainer never needs to know which is in use:
-    forward(features, mask) -> (B, out_dim), L2-normalized
-    null_condition(batch, device)          the unconditional vector for CFG
-    apply_cfg_dropout(cond, p)             AudioLDM's condition dropout
+  L0 mean_linear   masked mean-pool + one linear      0.66M   is a linear probe enough?
+  L1 attn_mlp      attention-pool + MLP               7.09M   does learned pooling help?
+  L2 xformer       transformer + attention-pool      32.28M   does temporal modelling help?
+  L3 qformer       k learned queries + MLP           18.63M   is one pooled vector the limit?
 
-Note on duplication: `mapper.py::SpeechToClapMapper` (L2) implements this contract
-independently rather than subclassing `BaseConditioner`. That is deliberate -- changing its
-module structure would change its state_dict keys and break loading the checkpoints already
-on disk from the first run.
+Note the ladder is ordered by conceptual complexity, not parameter count: qformer has fewer
+params than xformer because xformer's two 4096-wide transformer FFNs dominate.
+
+Shared contract, so the trainer never needs to know which rung is in use:
+    forward(features, mask) -> (B, output_dim), L2-normalized
+    null_condition(batch, device)      the unconditional vector for CFG
+    apply_cfg_dropout(cond, p)         AudioLDM's condition dropout
+Subclasses implement `encode()` and inherit normalization, the null embedding and dropout.
 """
 
 from __future__ import annotations
@@ -31,11 +36,44 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from salm.mapper import CLAP_EMBED_DIM, AttentionPool
+# AudioLDM's CLAP projection width. Verified at runtime against the U-Net's
+# projection_class_embeddings_input_dim rather than trusted as a constant.
+CLAP_EMBED_DIM = 512
+
+
+class AttentionPool(nn.Module):
+    """Pool (B, T, D) -> (B, D) with a single learned query, honouring a padding mask."""
+
+    def __init__(self, dim: int, num_heads: int = 8) -> None:
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, dim) * dim**-0.5)
+        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        x:    (B, T, D)
+        mask: (B, T) bool, True = real frame. None means all frames are real.
+        """
+        x = self.norm(x)
+        q = self.query.expand(x.shape[0], -1, -1)
+
+        key_padding_mask = None
+        if mask is not None:
+            # MultiheadAttention wants True = IGNORE, the inverse of our convention.
+            key_padding_mask = ~mask
+            # A fully masked row produces NaNs, so keep frame 0 alive.
+            all_masked = key_padding_mask.all(dim=1)
+            if all_masked.any():
+                key_padding_mask = key_padding_mask.clone()
+                key_padding_mask[all_masked, 0] = False
+
+        pooled, _ = self.attn(q, x, x, key_padding_mask=key_padding_mask)
+        return pooled.squeeze(1)
 
 
 class BaseConditioner(nn.Module):
-    """Shared normalization, null embedding, and CFG dropout."""
+    """Shared normalization, null embedding and CFG dropout for every rung."""
 
     def __init__(self, output_dim: int = CLAP_EMBED_DIM) -> None:
         super().__init__()
@@ -51,8 +89,8 @@ class BaseConditioner(nn.Module):
         self, features: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         # L2-normalized because AudioLDM's pipeline normalizes its CLAP conditions; an
-        # unnormalized vector is out of distribution for the U-Net even if its direction
-        # is right.
+        # unnormalized vector is out of distribution for the U-Net even if its direction is
+        # right.
         return F.normalize(self.encode(features, mask), dim=-1)
 
     def null_condition(self, batch_size: int, device: torch.device) -> torch.Tensor:
@@ -60,6 +98,7 @@ class BaseConditioner(nn.Module):
         return F.normalize(null, dim=-1)
 
     def apply_cfg_dropout(self, cond: torch.Tensor, dropout_prob: float) -> torch.Tensor:
+        """Replace whole conditions with the null embedding, as AudioLDM does for CFG."""
         if dropout_prob <= 0.0:
             return cond
         keep = torch.rand(cond.shape[0], device=cond.device) >= dropout_prob
@@ -74,8 +113,9 @@ def _masked_mean(features: torch.Tensor, mask: torch.Tensor | None) -> torch.Ten
     """
     Mean over real frames only.
 
-    Masking matters more than it looks: Whisper pads every input to 30 s, while TTAS speech
-    averages 4.9 s, so an unmasked mean would dilute the utterance with ~80% silence.
+    Masking matters more than it looks: Whisper emits a fixed 1500 frames for its 30 s
+    window while TTAS speech averages 4.9 s (~245 real frames), so an unmasked mean would
+    dilute the utterance with ~84% silence.
     """
     if mask is None:
         return features.mean(dim=1)
@@ -88,6 +128,7 @@ class MeanPoolLinear(BaseConditioner):
 
     def __init__(self, input_dim: int, output_dim: int = CLAP_EMBED_DIM) -> None:
         super().__init__(output_dim)
+        self.input_dim = input_dim
         self.proj = nn.Linear(input_dim, output_dim)
 
     def encode(self, features: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
@@ -95,7 +136,7 @@ class MeanPoolLinear(BaseConditioner):
 
 
 class AttnPoolMLP(BaseConditioner):
-    """L1: learned attention pooling + MLP head, but no temporal self-attention."""
+    """L1: learned attention pooling + MLP head, no temporal self-attention."""
 
     def __init__(
         self,
@@ -106,6 +147,7 @@ class AttnPoolMLP(BaseConditioner):
         dropout: float = 0.1,
     ) -> None:
         super().__init__(output_dim)
+        self.input_dim = input_dim
         self.in_proj = nn.Linear(input_dim, hidden_dim)
         self.pool = AttentionPool(hidden_dim, num_heads=num_heads)
         self.head = nn.Sequential(
@@ -119,14 +161,62 @@ class AttnPoolMLP(BaseConditioner):
         return self.head(self.pool(self.in_proj(features), mask=mask))
 
 
+class XFormerConditioner(BaseConditioner):
+    """
+    L2: self-attention over the frame sequence, then attention pooling.
+
+    Submodule names (in_proj / blocks / pool / out / null_embedding) are deliberately
+    unchanged from the original `SpeechToClapMapper`, so state_dict keys match and
+    checkpoints written before the rename still load.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int = CLAP_EMBED_DIM,
+        hidden_dim: int = 1024,
+        num_layers: int = 2,
+        num_heads: int = 8,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__(output_dim)
+        self.input_dim = input_dim
+
+        self.in_proj = nn.Linear(input_dim, hidden_dim)
+        self.blocks = nn.ModuleList(
+            nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=num_heads,
+                dim_feedforward=hidden_dim * 4,
+                dropout=dropout,
+                batch_first=True,
+                norm_first=True,
+            )
+            for _ in range(num_layers)
+        )
+        self.pool = AttentionPool(hidden_dim, num_heads=num_heads)
+        self.out = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def encode(self, features: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        x = self.in_proj(features)
+        src_key_padding_mask = None if mask is None else ~mask
+        for block in self.blocks:
+            x = block(x, src_key_padding_mask=src_key_padding_mask)
+        return self.out(self.pool(x, mask=mask))
+
+
 class QueryPoolMapper(BaseConditioner):
     """
     L3: k learned query tokens cross-attend to the frames, then are concatenated.
 
-    Motivation: L0-L2 all squeeze everything through a single pooled vector. Multiple
-    queries can each specialise (e.g. scene, action, intensity) before the final
-    projection, which probes whether single-vector pooling is the limiting factor --
-    without leaving AudioLDM's single-vector conditioning interface.
+    Probes whether single-vector pooling is the limiting factor: multiple queries can each
+    specialise (scene, action, intensity) before the final projection, while still fitting
+    AudioLDM's single-vector conditioning interface.
     """
 
     def __init__(
@@ -140,6 +230,7 @@ class QueryPoolMapper(BaseConditioner):
         dropout: float = 0.1,
     ) -> None:
         super().__init__(output_dim)
+        self.input_dim = input_dim
         self.in_proj = nn.Linear(input_dim, hidden_dim)
         self.queries = nn.Parameter(torch.randn(1, num_queries, hidden_dim) * hidden_dim**-0.5)
         self.norm = nn.LayerNorm(hidden_dim)
@@ -161,7 +252,6 @@ class QueryPoolMapper(BaseConditioner):
         key_padding_mask = None
         if mask is not None:
             key_padding_mask = ~mask
-            # An all-masked row yields NaNs from attention; keep frame 0 alive.
             all_masked = key_padding_mask.all(dim=1)
             if all_masked.any():
                 key_padding_mask = key_padding_mask.clone()
@@ -172,3 +262,8 @@ class QueryPoolMapper(BaseConditioner):
             q = q + delta
 
         return self.head(q.flatten(1))
+
+
+# Deprecated alias. Kept so checkpoints and configs written before the rename keep working;
+# prefer XFormerConditioner in new code.
+SpeechToClapMapper = XFormerConditioner

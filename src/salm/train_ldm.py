@@ -4,10 +4,10 @@ Rung 3: AudioLDM's training recipe applied to S2A (speech -> ambient audio).
 This is AudioLDM's own objective, unchanged: epsilon-prediction MSE in the VAE latent
 space, with classifier-free guidance trained by dropping the condition on a fraction of
 steps. The only substitution is WHERE the conditioning vector comes from -- instead of a
-CLAP text embedding, a trainable mapper produces it from frozen speech-encoder features.
+CLAP text embedding, a trainable conditioner produces it from frozen speech-encoder features.
 
 Frozen: speech encoder, mel VAE, HiFi-GAN vocoder.
-Trainable: mapper + U-Net.
+Trainable: conditioner + U-Net.
 
 Run with torchrun for DDP across the node's 4 H100s:
     torchrun --nproc_per_node=4 -m salm.train_ldm --config configs/s2a_rung3.yaml
@@ -57,17 +57,17 @@ class TrainConfig:
     arch: str = "s2a_audioldm_whisper_xformer"
     audioldm_model_id: str = project_paths.AUDIOLDM_MODEL_ID
     whisper_path: str = str(project_paths.WHISPER_LARGE_V3_PATH)
-    mapper_hidden_dim: int = 1024
-    mapper_layers: int = 2
-    mapper_dropout: float = 0.1
-    mapper_num_queries: int = 8    # qformer only
+    cond_hidden_dim: int = 1024
+    cond_layers: int = 2
+    cond_dropout: float = 0.1
+    cond_num_queries: int = 8    # qformer only
 
     # optimization
     batch_size: int = 16          # per GPU
     num_workers: int = 6
     epochs: int = 20
-    lr_mapper: float = 1e-4
-    lr_unet: float = 1e-5         # much lower: the U-Net is pretrained, the mapper is not
+    lr_conditioner: float = 1e-4
+    lr_unet: float = 1e-5         # much lower: the U-Net is pretrained, the conditioner is not
     weight_decay: float = 1e-2
     warmup_steps: int = 500       # base config sets 300; at 234 steps/epoch that is ~1.28 epochs
     grad_clip: float = 1.0
@@ -82,7 +82,7 @@ class TrainConfig:
     # model, where annealing all the way to zero gives the best quality.
     lr_total_steps: int = 0
     cfg_dropout_prob: float = 0.1
-    freeze_unet: bool = False     # True reduces this to a mapper-only run
+    freeze_unet: bool = False     # True reduces this to a conditioner-only run
     seed: int = 1337
 
     # runtime
@@ -234,10 +234,28 @@ def main() -> int:
     ap.add_argument("--override", nargs="*", default=[], help="key=value overrides")
     args = ap.parse_args()
 
+    # Pre-rename aliases. "mapper" was the old name for the conditioner; old YAML and the
+    # configs embedded in existing checkpoints still use these keys.
+    LEGACY_KEYS = {
+        "lr_mapper": "lr_conditioner",
+        "mapper_hidden_dim": "cond_hidden_dim",
+        "mapper_layers": "cond_layers",
+        "mapper_dropout": "cond_dropout",
+        "mapper_num_queries": "cond_num_queries",
+        "output_root": "runs_root",
+        "encoder": None,          # superseded by `arch`; ignored rather than an error
+    }
+
     cfg = TrainConfig()
     for path in args.config:
         raw = yaml.safe_load(Path(path).read_text()) or {}
         for k, v in raw.items():
+            if k in LEGACY_KEYS:
+                new_k = LEGACY_KEYS[k]
+                if new_k is None:
+                    continue
+                log(f"    config key {k!r} is deprecated; using {new_k!r}")
+                k = new_k
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
             else:
@@ -306,10 +324,21 @@ def main() -> int:
         drop_last=True,
         persistent_workers=cfg.num_workers > 0,
     )
+    # Shard validation across ranks. Without a sampler every rank iterated the FULL val set
+    # (118 batches each instead of 30) and only rank 0's numbers were kept -- three quarters
+    # of the work discarded. With sharding each rank scores a disjoint slice and the totals
+    # are all_reduce'd, so the metric is identical but ~4x cheaper.
+    #
+    # drop_last=False so no val row is silently skipped; sums are weighted by sample count,
+    # which keeps the mean exact even with unequal final batches.
+    val_sampler = (
+        DistributedSampler(val_ds, shuffle=False, drop_last=False) if world_size > 1 else None
+    )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg.batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=max(2, cfg.num_workers // 2),
         collate_fn=collate,
         pin_memory=True,
@@ -340,30 +369,30 @@ def main() -> int:
 
     components = build_arch(cfg.arch, asdict(cfg), device, output_dim=cond_dim)
     encoder = components.encoder
-    mapper = components.conditioner
+    conditioner = components.conditioner
     log(f"    frozen encoder feature_dim={encoder.feature_dim}")
-    log(f"    conditioner trainable params: {mapper.num_trainable_parameters()/1e6:.2f}M")
+    log(f"    conditioner trainable params: {conditioner.num_trainable_parameters()/1e6:.2f}M")
 
     if cfg.freeze_unet:
         unet.eval()
         for p in unet.parameters():
             p.requires_grad_(False)
-        log("    U-Net FROZEN (mapper-only run)")
+        log("    U-Net FROZEN (conditioner-only run)")
     else:
         unet.train()
         unet.enable_gradient_checkpointing()
         log(f"    U-Net trainable params: {sum(p.numel() for p in unet.parameters())/1e6:.1f}M")
 
     if world_size > 1:
-        mapper = DistributedDataParallel(mapper, device_ids=[local_rank])
+        conditioner = DistributedDataParallel(conditioner, device_ids=[local_rank])
         if not cfg.freeze_unet:
             unet = DistributedDataParallel(unet, device_ids=[local_rank])
 
-    mapper_module = mapper.module if isinstance(mapper, DistributedDataParallel) else mapper
+    conditioner_module = conditioner.module if isinstance(conditioner, DistributedDataParallel) else conditioner
 
     # -------------------------------------------------------------- optimizer
     param_groups = [
-        {"params": [p for p in mapper.parameters() if p.requires_grad], "lr": cfg.lr_mapper}
+        {"params": [p for p in conditioner.parameters() if p.requires_grad], "lr": cfg.lr_conditioner}
     ]
     if not cfg.freeze_unet:
         param_groups.append(
@@ -391,12 +420,12 @@ def main() -> int:
     log(f"steps/epoch={steps_per_epoch} total_steps={total_steps}")
 
     def compute_condition(batch) -> torch.Tensor:
-        """Frozen encoder -> mapper -> (B, cond_dim) L2-normalized CLAP-space vector."""
+        """Frozen encoder -> conditioner -> (B, cond_dim) L2-normalized CLAP-space vector."""
         with torch.no_grad():
             feats, mask = encoder.encode_with_mask(
                 batch["speech"].to(device), batch["speech_length"]
             )
-        return mapper(feats, mask=mask)
+        return conditioner(feats, mask=mask)
 
     def diffusion_loss(
         batch,
@@ -434,7 +463,7 @@ def main() -> int:
         if cond is None:
             cond = compute_condition(batch)
         if train:
-            cond = mapper_module.apply_cfg_dropout(cond, cfg.cfg_dropout_prob)
+            cond = conditioner_module.apply_cfg_dropout(cond, cfg.cfg_dropout_prob)
 
         # AudioLDM conditions via class_labels (a single global vector), NOT via
         # cross-attention token sequences -- hence encoder_hidden_states=None.
@@ -474,7 +503,7 @@ def main() -> int:
           - loss_t<lo>_<hi>: loss restricted to a timestep band. Conditioning matters most
             at low noise, where the global average drowns it out.
         """
-        mapper.eval()
+        conditioner.eval()
         if not cfg.freeze_unet:
             unet.eval()
 
@@ -513,9 +542,26 @@ def main() -> int:
                         bucket_sum[bi] += bl.item() * n
                         bucket_count[bi] += n
 
-        mapper.train()
+        conditioner.train()
         if not cfg.freeze_unet:
             unet.train()
+
+        # Each rank scored a disjoint slice, so sum the raw totals and counts across ranks
+        # before dividing. Reducing the sums (not the per-rank means) keeps the result exact
+        # when ranks get unequal numbers of samples.
+        if dist.is_initialized():
+            packed = torch.tensor(
+                [total, float(count), cos_sum, float(cos_count)] + bucket_sum
+                + [float(c) for c in bucket_count],
+                device=device,
+                dtype=torch.float64,
+            )
+            dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+            vals = packed.tolist()
+            nb = len(buckets)
+            total, count, cos_sum, cos_count = vals[0], int(vals[1]), vals[2], int(vals[3])
+            bucket_sum = vals[4 : 4 + nb]
+            bucket_count = [int(c) for c in vals[4 + nb : 4 + 2 * nb]]
 
         out = {"val_loss": total / max(count, 1)}
         if cos_count:
@@ -523,6 +569,7 @@ def main() -> int:
         if with_buckets:
             for bi, (lo, hi) in enumerate(buckets):
                 out[f"val_loss_t{lo}_{hi}"] = bucket_sum[bi] / max(bucket_count[bi], 1)
+        out["val_samples"] = count
         return out
 
     def save_checkpoint(
@@ -536,7 +583,7 @@ def main() -> int:
             "step": step,
             "val_loss": val_loss,
             "config": asdict(cfg),
-            "mapper": mapper_module.state_dict(),
+            "mapper": conditioner_module.state_dict(),
         }
         if not cfg.freeze_unet:
             payload["unet"] = unet_module.state_dict()
@@ -585,7 +632,7 @@ def main() -> int:
         log(f"Resuming from {ckpt_path}")
         payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
-        mapper_module.load_state_dict(payload["mapper"])
+        conditioner_module.load_state_dict(payload["mapper"])
         if "unet" in payload and not cfg.freeze_unet:
             unet_mod = unet.module if isinstance(unet, DistributedDataParallel) else unet
             unet_mod.load_state_dict(payload["unet"])
@@ -663,7 +710,7 @@ def main() -> int:
                     wandb_run.log(
                         {
                             "train/step_loss": loss.item(),
-                            "train/lr_mapper": lrs[0],
+                            "train/lr_conditioner": lrs[0],
                             "train/lr_unet": lrs[1] if len(lrs) > 1 else 0.0,
                             "epoch": epoch,
                         },

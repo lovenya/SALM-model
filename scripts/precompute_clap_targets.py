@@ -7,8 +7,8 @@ normal for eps-MSE averaged over random timesteps, but it means we cannot tell w
 100-epoch run is better than a 12-epoch one.
 
 These embeddings give us a signal that *does* move: during validation we compare the
-mapper's output vector against the CLAP embedding of the ground-truth ambient clip. High
-cosine means "the mapper is pointing at the right scene", which is exactly the thing the
+conditioner's output vector against the CLAP embedding of the ground-truth ambient clip. High
+cosine means "the conditioner is pointing at the right scene", which is exactly the thing the
 model has to learn and exactly what the diffusion loss hides.
 
 Uses `laion/clap-htsat-unfused` -- the NON-fusion variant, matching what AudioLDM was
