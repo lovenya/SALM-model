@@ -107,9 +107,41 @@ class ClapAudioEncoder:
         return F.normalize(feats, dim=-1)
 
 
+def load_trained_unet(pipe, payload: dict, dtype: torch.dtype) -> bool:
+    """
+    Load the finetuned U-Net weights from a checkpoint into the pipeline.
+
+    This existed only as a claim in a docstring until 2026-08-12: `load_s2a_checkpoint` restored
+    the conditioner and never touched `pipe.unet`, so EVERY s2a sample generated before that date
+    used the pristine pretrained AudioLDM U-Net. Since our runs train the U-Net too
+    (`freeze_unet=False`, `lr_unet=1e-5`), those samples did not represent the trained model at all.
+
+    Snapshot checkpoints store weights in fp16, so cast to float before loading and then return the
+    module to the pipeline's dtype.
+
+    Returns True if weights were loaded, False if the checkpoint had none.
+    """
+    if "unet" not in payload:
+        log("    checkpoint contains NO unet weights (freeze_unet was true?) -- "
+            "using pretrained AudioLDM U-Net")
+        return False
+
+    state = {
+        k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
+        for k, v in payload["unet"].items()
+    }
+    missing, unexpected = pipe.unet.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        log(f"    WARNING: unet load had {len(missing)} missing / {len(unexpected)} unexpected keys")
+    pipe.unet.to(dtype)
+    log(f"    loaded TRAINED U-Net weights ({len(state)} tensors)")
+    return True
+
+
 def load_s2a_checkpoint(checkpoint: Path, device: str):
     """
-    Restore the trained conditioner (and finetuned U-Net weights, if present).
+    Restore the trained conditioner. The U-Net is loaded separately by `load_trained_unet`,
+    because the pipeline must exist first.
 
     The architecture is rebuilt through the registry using the `arch` recorded in the
     checkpoint's own config, so any rung of the ladder loads without this function knowing
@@ -158,6 +190,10 @@ def main() -> int:
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--copy-reference", action="store_true",
                     help="also write the reference ambient audio, for A/B listening")
+    ap.add_argument("--skip-unet-weights", action="store_true",
+                    help="do NOT load the finetuned U-Net from the checkpoint; use the pretrained "
+                         "AudioLDM U-Net instead. Isolates the conditioner's contribution, and "
+                         "reproduces the behaviour of samples generated before 2026-08-12.")
     args = ap.parse_args()
 
     if args.mode == "s2a" and not args.checkpoint:
@@ -178,9 +214,16 @@ def main() -> int:
     pipe = load_pipeline(args.device, dtype)
 
     encoder = conditioner = clap = None
+    unet_weights_loaded = False
+    checkpoint_epoch = None
     if args.mode == "s2a":
         log("Loading trained checkpoint ...")
-        encoder, conditioner, _payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
+        encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
+        checkpoint_epoch = payload.get("epoch")
+        if args.skip_unet_weights:
+            log("    --skip-unet-weights: keeping the PRETRAINED U-Net (ablation baseline)")
+        else:
+            unet_weights_loaded = load_trained_unet(pipe, payload, dtype)
     elif args.mode == "rung1":
         log("Loading CLAP audio tower (control) ...")
         clap = ClapAudioEncoder(args.device)
@@ -283,6 +326,11 @@ def main() -> int:
         "guidance_scale": args.guidance_scale,
         "seed": args.seed,
         "audioldm_model_id": project_paths.AUDIOLDM_MODEL_ID,
+        # Provenance: which weights actually produced these files. Without this, a directory of
+        # wavs is ambiguous about whether the trained U-Net was used.
+        "checkpoint_epoch": checkpoint_epoch,
+        "unet_weights_loaded": unet_weights_loaded,
+        "skip_unet_weights": bool(args.skip_unet_weights),
         "rms_mean": float(np.mean(rms)) if rms else 0.0,
         "rms_min": float(np.min(rms)) if rms else 0.0,
         "near_silent_count": int(sum(1 for r in rms if r < 1e-4)),

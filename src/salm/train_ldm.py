@@ -717,10 +717,27 @@ def main() -> int:
                         step=global_step,
                     )
 
-            if deadline is not None and time.time() > deadline:
-                log(f"  internal deadline reached at step {global_step}; stopping cleanly")
-                stop = True
-                break
+            # The deadline decision MUST be collective. Evaluated per-rank against each rank's own
+            # clock, one rank leaves this loop while the others are still waiting on the gradient
+            # all-reduce -- the collective never completes and NCCL's watchdog kills the job 600 s
+            # later. That is exactly how job 406301 died after 91 good epochs: deadline 07:38:49,
+            # last checkpoint 07:39:00, timeout fired 07:49:32 on an ALLREDUCE of 321288 elements
+            # (a DDP gradient bucket, not our metrics reduce).
+            #
+            # Checked only every `log_every` steps so the extra 1-element collective is negligible.
+            # DistributedSampler(drop_last=True) guarantees every rank runs the same number of
+            # iterations, so this reduce is always reached by all of them.
+            if deadline is not None and global_step % cfg.log_every == 0:
+                local_stop = 1.0 if time.time() > deadline else 0.0
+                if dist.is_initialized():
+                    flag = torch.tensor([local_stop], device=device)
+                    dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+                    local_stop = flag.item()
+                if local_stop > 0:
+                    log(f"  internal deadline reached at step {global_step}; "
+                        "all ranks stopping together")
+                    stop = True
+                    break
 
         train_loss = running / max(seen, 1)
 
