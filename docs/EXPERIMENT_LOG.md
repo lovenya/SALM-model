@@ -299,3 +299,45 @@ everything else in single or double digits, with many free-text variants ("neutr
 frustration", "startled then neutral", "cheerful but frustrated"). The
 emotion-at-matched-transcript experiment therefore has **~3 usable classes, not 47**, and needs
 label normalisation first.
+
+## Correction 2026-08-12: "one-to-many" was the wrong justification (and the right one, measured)
+
+I had argued the T0 regression baseline would produce blurry audio because the task is one-to-many
+and MSE regression converges to the mean of valid outputs. The user pushed back: **our dataset
+pairing is literally 1:1** -- 15,033 speech clips, 15,033 distinct target clips, one target each.
+That is correct, and two things were wrong with my claim:
+
+1. I stated a property of the *conditional distribution* p(audio|speech) as if it were a property of
+   the dataset. And our data cannot demonstrate that breadth anyway: at 1.1 pairs per unique scene we
+   have almost no cases of the same utterance paired with different valid ambiences. It is a
+   modelling assumption, not a measured fact, and must be cited as such.
+2. The mechanism was wrong regardless. With 15k distinct targets a high-capacity regressor can simply
+   MEMORISE each pair -- no averaging is forced by the training data at all.
+
+**The real mechanism, measured on the precomputed train latents** (pure numpy, no GPU):
+
+| what | latent std | ratio to a real latent |
+|---|---|---|
+| single real latent | 1.032 | 1.00 |
+| blend of 2 | 0.753 | **0.73** |
+| blend of 4 | 0.588 | 0.57 |
+| blend of 16 | 0.421 | 0.41 |
+| blend of 64 | 0.359 | 0.35 |
+| midpoint of two (alpha=0.5) | 0.741 | 0.72 |
+
+Blending just TWO real ambient latents already collapses the variance to 0.73x. AudioLDM's VAE
+decoder expects std ~1.0 -- that is what the 0.9393 scaling factor is calibrated for, and our own
+latents measure 0.977 after scaling. At 0.73 the decoder is off-distribution, which is heard as
+quieter, smoother, less textured audio.
+
+Note the decay is far slower than 1/sqrt(k) (0.348 measured at k=64 vs 0.125 predicted), so ambient
+latents share a large common component and differ in a smaller varying part. It is that varying
+part -- the texture -- that averaging destroys first.
+
+**Corrected claim, which no longer depends on one-to-many:** an MSE regressor must interpolate on
+held-out inputs, and interpolation in this latent space is measurably off-distribution. Honest
+caveat: this shows interpolation is off-distribution, not that the regressor will definitely
+interpolate -- a perfectly memorising model would not. But on unseen utterances it must, to some
+degree. This is also precisely why diffusion helps: it SAMPLES, landing on the manifold at std ~1
+rather than between points at 0.73.
+
