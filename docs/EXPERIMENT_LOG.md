@@ -222,6 +222,28 @@ generate both ways on identical rows and *measure* what finetuning bought. `summ
 
 ---
 
+## 2026-08-12 — W&B sync: abrupt death corrupts the transaction log
+
+First sync attempt (nothing had ever been uploaded). Two of four offline runs synced; the two that
+failed did so with `transactionlog: error reading: unexpected EOF`:
+
+| run | outcome | why |
+|---|---|---|
+| `prnq4ivb` (smoke_resume, 2 fragments) | **synced** | exited cleanly |
+| `ncoohd92` (long100, 91 epochs) | **EOF error** | job 406301 killed by the NCCL watchdog |
+| `cbyrr429` (long100_slowval_aborted) | **EOF error** | cancelled with `scancel` |
+
+Lesson worth carrying: a process killed without flushing leaves a truncated `.wandb` transaction
+log, and the tail is unrecoverable — retrying does not help. **So the per-rank deadline bug cost us
+twice**: it killed the job *and* corrupted its W&B record. The collective-deadline fix prevents both,
+because a clean exit flushes the log.
+
+Not a data loss in practice: partial data did upload (runs exist at
+`wandb.ai/lovenya-org/salm-s2a/runs/{ncoohd92,cbyrr429}`), and `history.json` is complete for all 91
+epochs — which is what the plots are generated from. Treat W&B as a convenience, `history.json` as
+the record. No `.synced` marker was written for the failed pair, so a later sync retries them
+automatically.
+
 ## Pending measurements
 
 Nothing here is a result yet; these are the numbers we are waiting on.

@@ -95,5 +95,7 @@ the outcome.
   assuming.
 - **[IMPL] Delete `salm_model_outputs/legacy/`** (130 MB of superseded smoke artifacts) when you're
   satisfied nothing there is needed. Scratch is at **91% space, 908K/1000K inodes**.
-- **[IMPL] `wandb sync`** — one offline run exists and has never been uploaded. See
-  `docs/wandb_setup.md`.
+- **[DONE 2026-08-12] `wandb sync`** — ran; 2 of 4 runs synced. `ncoohd92` (long100) and
+  `cbyrr429` failed with a truncated transaction log because both processes were killed without
+  flushing. Unrecoverable tail; partial data did upload. `history.json` is the authoritative record
+  and is complete. Future syncs retry them automatically (no marker was written).
