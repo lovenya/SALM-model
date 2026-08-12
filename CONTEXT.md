@@ -9,6 +9,15 @@ This file is the internal working doc for this repo. It is NOT the public
 README -- keep cluster paths, in-progress decisions, and open questions here.
 Update it via the `/update-docs` skill after every meaningful milestone.
 
+## Living docs — read these to catch up
+
+- `docs/EXPERIMENT_LOG.md` — chronological record of what we tried, measured, decided and got
+  wrong. The place to look for "why is it like this?" and for every number we have.
+- `docs/OPEN_ITEMS.md` — what is still to discuss, decide or implement. Kept separate so nothing
+  gets lost at the current pace.
+- `docs/wandb_setup.md` — W&B on this cluster (offline mode, sync workflow, the entity trap).
+- `CLAUDE.md` — hard rules, chiefly: **never touch Slurm jobs without explicit instruction.**
+
 ## What this repo is
 
 `SALM-model` is where **model training** for the SpeechAudio LM project
