@@ -14,7 +14,7 @@ waiting on a decision).
 
 ## Tier −1 · Diagnostics — is the condition used at all?
 
-**Status: running (job 406885).** Everything below is easier to choose once this lands.
+**Status: queued (job 406885, starts 16:56 EDT 2026-08-12).** Everything below is easier to choose once this lands.
 
 | id | test | what zero means |
 |---|---|---|
@@ -41,7 +41,7 @@ Cheap, and what a reviewer checks first.
 | id | baseline | tests | status |
 |---|---|---|---|
 | B0 | **unconditional** — sample from the learned null embedding | what "zero information" scores; any model must beat it | not built |
-| B1 | **retrieval by speech** — nearest training utterance → its paired ambient clip, verbatim | whether *generation* is needed at all | **running (406885)**, both Whisper and CLAP spaces |
+| B1 | **retrieval by speech** — nearest training utterance → its paired ambient clip, verbatim | whether *generation* is needed at all | **queued (406885)**, both Whisper and CLAP spaces |
 | B2 | **retrieval by transcript** — ASR → nearest caption → its clip | whether *audio* input is needed or text suffices | not built |
 | B3 | **caption oracle (rung0)** — condition on ground-truth `audio_cap` | the ceiling | done |
 | B5 | **majority-scene prior** — always generate the most frequent caption | dataset bias | not built |
@@ -63,10 +63,17 @@ PANNs FAD at ρ = −0.94 against human ratings, above CLAP and VGGish. Choose i
 end-to-end model for the task and that it wins on latency, memory and compute footprint. An earlier
 draft treated beating the cascade as existential; that was wrong.
 
-**Still open:** the *minimal two-stage* pipeline (ASR → transcript → off-the-shelf text-to-audio) is
-a different thing, and the literature is emphatic it is the row reviewers demand, because it decides
-whether end-to-end is needed. V2A-Mapper's analogue loses badly (FD 56.40 vs 24.17). See
-`OPEN_ITEMS.md`.
+**Resolved 2026-08-12: the pipeline baseline already exists.** I had proposed building a "minimal
+two-stage" pipeline (ASR → transcript → text-to-audio) as distinct from the four-stage cascade. That
+was a distinction without a difference — for S2A the cascade *is* ASR → LLM → T2A, and it has already
+been run **and scored**: `fad`, `kad`, `kl_passt`, `inception_score` and
+`target_caption_clap_score` summaries exist under
+`salm_migration_clean/results/evals/stages/s2a/t2a/`. Nothing to build.
+
+What this changes: the reason to register our model in the eval config is not to create a baseline,
+it is so **our** outputs are scored by the **same** metrics into the same results tree as numbers that
+already exist. One caveat for later — the existing cascade eval used 2,277 test rows (the unfiltered
+split) while our clean_v2 S2A test has 1,878, so a fair comparison needs matching rows.
 
 ### Efficiency as a first-class result
 

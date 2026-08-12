@@ -25,16 +25,21 @@ the outcome.
 
 ## Decisions needed
 
-- **[DISCUSS] Register our model in `SpeechAudioLM/configs/model_capabilities.json`.** Blocks the
-  whole metric suite (`fad`, `kad`, `kl_passt`, `target_caption_clap_score`, `inception_score`).
-  One line — `"salm_audioldm_whisper": {"tasks": ["S2A","T2A"]}` — but it edits the *other* repo,
-  against the clean-room principle. Alternatives: borrow an already-registered name, or you make the
-  edit.
-- **[DISCUSS] The minimal pipeline baseline** — ASR → transcript → off-the-shelf text-to-audio. You
-  ruled out evaluating the heavy 4-stage cascade, which I accepted. This is the *narrow* two-stage
-  version, and the literature is emphatic that it is the row reviewers demand, because it decides
-  whether end-to-end is needed at all. V2A-Mapper's analogue loses badly (FD 56.40 vs 24.17), which
-  is the shape of result we'd want. Worth revisiting for this version only.
+- **[DISCUSS] Register our model in `SpeechAudioLM/configs/model_capabilities.json`.** It is a plain
+  whitelist: `evaluate.py` validates `--model` against it and hard-refuses otherwise
+  ("Unknown model 'salm_audioldm_whisper'. Known models: audio_omni, audiogen, cascaded, ..."), so
+  the metric suite cannot run at all until the name is listed. One line —
+  `"salm_audioldm_whisper": {"tasks": ["S2A","T2A"]}` — no behaviour change beyond permitting the
+  name. It edits the *other* repo though, against the clean-room principle. Alternatives: pass an
+  already-registered name such as `--model cascaded` (works, but files our results under someone
+  else's label), or you make the edit.
+  Why it matters: cascade metrics already exist, so registering is what lets **our** numbers be
+  scored by the **same** metrics into the same tree and be directly comparable.
+- **[RESOLVED 2026-08-12] The pipeline baseline needs no work** — it already exists and is scored.
+  For S2A the cascade *is* ASR → LLM → T2A, so my "minimal two-stage vs heavy four-stage" distinction
+  was meaningless. `fad`/`kad`/`kl_passt`/`inception_score`/`target_caption_clap_score` summaries are
+  under `results/evals/stages/s2a/t2a/`. Caveat for the eventual comparison: those ran on 2,277 test
+  rows (unfiltered) vs our clean_v2 S2A test of 1,878 — matching rows needed for fairness.
 - **[DISCUSS] Guidance scale.** `s=3.0` is my arbitrary choice (diffusers' AudioLDM default is 2.5,
   AudioGen uses 3.0). Untuned, and it materially affects quality and diversity. Sweep it?
 - **[DISCUSS] Which ladder rungs are worth the compute**, and how much breadth across Tiers 2–5 of
