@@ -115,3 +115,52 @@ the outcome.
   `cbyrr429` failed with a truncated transaction log because both processes were killed without
   flushing. Unrecoverable tail; partial data did upload. `history.json` is the authoritative record
   and is complete. Future syncs retry them automatically (no marker was written).
+
+## Efficiency: after the current cohort finishes (raised by the user 2026-08-12)
+
+The user proposed raising batch size once the queued runs complete, on the grounds that we are
+wasting compute (measured: 11.6 of 79.6 GB VRAM, util 61-74%). The instinct is right; the lever is
+wrong.
+
+**MEASURED: 84.6% of every Whisper pass is padding.** TTAS speech averages 4.63 s (median 4.34,
+p95 8.45, max 14.11) but Whisper always processes a fixed 30 s window -- 1500 frames of which ~232
+are real. The trainer's own comments note the frozen 635 M encoder dominates runtime, so it is
+spending ~6.5x more time on zeros than on speech.
+
+Raising batch size does not fix this; it processes more padding in parallel. Utilisation would climb
+toward 90% while the useful work per epoch stays identical. Utilisation measures how busy the GPU is,
+not how much of that work matters.
+
+### Recommended first: precompute the frozen Whisper features
+
+The encoder is frozen, so its output is constant across epochs -- exactly the argument that already
+justifies precomputing latents and CLAP targets.
+
+| storage | frames/sample | size |
+|---|---|---|
+| with 30 s padding | 1500 | 57.7 GB |
+| **valid frames only** | **232** | **8.9 GB** |
+
+92 GB free on /scratch, so the 8.9 GB variant fits. Removes the 635 M forward pass from every step
+of every epoch AND the CPU-bound speech decode/resample, i.e. both suspected bottlenecks. Benefits
+L0, L0f, O2 and T0 identically, since they share the encoder. Not built yet.
+
+### Then, and only with these three fixed together, raise the batch size
+
+| per-GPU bs | effective | steps/epoch | steps @100 ep | of pinned 23,400 | r1 chance |
+|---|---|---|---|---|---|
+| 16 (current) | 64 | 234 | 23,400 | 100% | 0.0625 |
+| 32 | 128 | 117 | 11,700 | 50% | 0.0312 |
+| 64 | 256 | 58 | 5,800 | 25% | 0.0156 |
+
+1. **`lr_total_steps` breaks SILENTLY.** At 64/GPU, 100 epochs is 5,800 steps against a curve pinned
+   to 23,400, so the run consumes 25% of the LR schedule and ends barely annealed. No error, just a
+   quietly worse and non-comparable model. Must be updated in lockstep with batch_size.
+2. **`val_clap_r1`'s chance baseline is `1/batch_size`**, so r1 is NOT comparable across batch
+   sizes. Compare each run against its own logged `val_clap_r1_chance`, never across cohorts.
+3. **LR needs rescaling** (linear or sqrt rule). Omit it and the new runs are under-tuned; apply it
+   and two variables changed at once, so the cohort boundary must be documented.
+
+Consequence either way: a batch-size change creates an old cohort (the completed 91-epoch L2 at
+effective 64) and a new cohort that cannot be compared directly. Worth doing deliberately, once,
+rather than drifting.
