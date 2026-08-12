@@ -1,5 +1,14 @@
-# The long run: 100 epochs to find where this saturates.
+# 100 epochs. Used for both the main run and the ladder rungs, so every experiment shares
+# one LR trajectory and is directly comparable.
 #
-# Sized from measured 2.08 min/epoch -> ~208 min of training. The internal deadline is set
-# by the sbatch (TRAIN_MINUTES), not here, so the same config works for any walltime.
+# lr_total_steps pins the cosine curve to 23,400 steps = 100 epochs x 234 steps/epoch
+# (15,033 train rows / 4 GPUs / batch 16). This is NUMERICALLY IDENTICAL to deriving the
+# curve from epochs=100, so nothing is lost -- but it decouples the curve from the stopping
+# point, which matters because a truncated run on a derived curve is not comparable to a
+# completed one. With a derived curve, a 5-epoch run is fully annealed at epoch 5 (LR factor
+# 0.000) while this run is at 0.997 there; with a fixed budget both walk the same curve and
+# differ only in how far they got.
+#
+# Comparison rule: only compare runs that share `epochs` AND `lr_total_steps`.
 epochs: 100
+lr_total_steps: 23400

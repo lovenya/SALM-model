@@ -69,8 +69,18 @@ class TrainConfig:
     lr_mapper: float = 1e-4
     lr_unet: float = 1e-5         # much lower: the U-Net is pretrained, the mapper is not
     weight_decay: float = 1e-2
-    warmup_steps: int = 500
+    warmup_steps: int = 500       # base config sets 300; at 234 steps/epoch that is ~1.28 epochs
     grad_clip: float = 1.0
+    # Length of the cosine curve, in optimizer steps. 0 = derive from epochs
+    # (steps_per_epoch * epochs), the historical behaviour, so queued runs are unaffected.
+    #
+    # Set it explicitly to make runs comparable even if one is truncated. With a derived
+    # length a run configured for 5 epochs is fully annealed at epoch 5 (LR factor 0.000)
+    # while a 100-epoch run is barely decayed there (0.997), so the two are not comparable
+    # at any epoch past warmup. With a fixed budget both follow the SAME curve and differ
+    # only in how far along they stopped. Use for ladder comparisons; leave 0 for a final
+    # model, where annealing all the way to zero gives the best quality.
+    lr_total_steps: int = 0
     cfg_dropout_prob: float = 0.1
     freeze_unet: bool = False     # True reduces this to a mapper-only run
     seed: int = 1337
@@ -79,6 +89,10 @@ class TrainConfig:
     amp_dtype: str = "bf16"       # H100: bf16 needs no loss scaling
     log_every: int = 25
     val_every_epochs: int = 1
+    # Timestep-bucket losses cost 4 extra U-Net passes over the val set. Measured: with them
+    # every epoch, validation was 2.87 of a 4.5 min epoch (64%) while training was only
+    # 1.63 min. They change slowly, so every 5th epoch is plenty and buys back most of that.
+    bucket_every_epochs: int = 5
     # 20, not 5: each checkpoint is ~869 MB, scratch is ~90% full, and 100 epochs at
     # every-5 would write 18.7 GB per run. See CONTEXT.md disk budget.
     save_every_epochs: int = 20
@@ -131,7 +145,19 @@ def setup_distributed() -> tuple[int, int, int]:
 
 
 def build_lr_lambda(warmup_steps: int, total_steps: int):
-    """Linear warmup then cosine decay."""
+    """
+    Linear warmup over `warmup_steps`, then a single cosine decay to zero at `total_steps`.
+
+    One curve, not per-epoch cycling (that would be cosine annealing with warm restarts,
+    which we deliberately do not use).
+
+    `total_steps` is what makes runs comparable or not. Derived from `epochs` it couples the
+    curve to the stopping point, so a run configured for 5 epochs and a run configured for
+    100 epochs are at LR factor 0.000 vs 0.997 at the *same* epoch 5 -- the first has fully
+    annealed, the second has barely started decaying. Comparing them is meaningless.
+    Passing an explicit budget (cfg.lr_total_steps) decouples the two: every run walks the
+    same curve and simply stops at a different point along it.
+    """
 
     def fn(step: int) -> float:
         if warmup_steps > 0 and step < warmup_steps:
@@ -346,7 +372,19 @@ def main() -> int:
     optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
 
     steps_per_epoch = len(train_loader)
-    total_steps = steps_per_epoch * cfg.epochs
+    if cfg.lr_total_steps > 0:
+        total_steps = cfg.lr_total_steps
+        log(f"LR curve length FIXED at {total_steps} steps "
+            f"({total_steps/steps_per_epoch:.1f} epochs' worth), independent of epochs="
+            f"{cfg.epochs}. Runs sharing this value are comparable at equal step counts "
+            "even if truncated.")
+    else:
+        total_steps = steps_per_epoch * cfg.epochs
+        log(f"LR curve length derived from epochs: {total_steps} steps. NOTE this couples "
+            "the curve to the stopping point, so this run is only comparable to others "
+            f"with the same epochs={cfg.epochs} that also ran to completion.")
+    log(f"warmup {cfg.warmup_steps} steps = epoch "
+        f"{cfg.warmup_steps/max(steps_per_epoch,1):.2f}; cosine decay after that")
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, build_lr_lambda(cfg.warmup_steps, total_steps)
     )
@@ -361,13 +399,22 @@ def main() -> int:
         return mapper(feats, mask=mask)
 
     def diffusion_loss(
-        batch, train: bool, timesteps: torch.Tensor | None = None
+        batch,
+        train: bool,
+        timesteps: torch.Tensor | None = None,
+        cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         AudioLDM's objective: MSE between predicted and true noise in latent space.
 
         `timesteps` may be supplied to evaluate a specific noise level, which is how the
         per-bucket validation losses are computed.
+
+        `cond` may be supplied to reuse an already-computed conditioning vector. That
+        matters a lot: the frozen Whisper encoder is 635M params and always processes a
+        padded 30 s window, so it dominates runtime. Validation evaluates the main loss,
+        the CLAP cosine and four timestep buckets over the same batch, and recomputing the
+        condition for each doubled epoch time until this was threaded through.
         """
         mean = batch["latent_mean"].to(device, non_blocking=True)
         std = batch["latent_std"].to(device, non_blocking=True)
@@ -384,7 +431,8 @@ def main() -> int:
             ).long()
         noisy = noise_scheduler.add_noise(latents, noise, timesteps)
 
-        cond = compute_condition(batch)
+        if cond is None:
+            cond = compute_condition(batch)
         if train:
             cond = mapper_module.apply_cfg_dropout(cond, cfg.cfg_dropout_prob)
 
@@ -406,13 +454,15 @@ def main() -> int:
 
         return F.mse_loss(pred.float(), target.float())
 
-    def diffusion_loss_at_timestep(batch, timesteps: torch.Tensor) -> torch.Tensor:
-        return diffusion_loss(batch, train=False, timesteps=timesteps)
+    def diffusion_loss_at_timestep(
+        batch, timesteps: torch.Tensor, cond: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return diffusion_loss(batch, train=False, timesteps=timesteps, cond=cond)
 
     buckets = timestep_buckets(noise_scheduler.config.num_train_timesteps, 4)
 
     @torch.no_grad()
-    def validate() -> dict:
+    def validate(with_buckets: bool = True) -> dict:
         """
         Validation with metrics that actually move.
 
@@ -435,28 +485,33 @@ def main() -> int:
 
         for batch in val_loader:
             n = batch["speech"].shape[0]
+
+            # Compute the conditioning ONCE and reuse it for every metric below. The
+            # frozen Whisper encoder dominates runtime, so recomputing it per metric made
+            # validation cost 6 encoder passes per batch and doubled epoch time.
             with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
-                loss = diffusion_loss(batch, train=False)
-            total += loss.item() * n
-            count += n
+                cond = compute_condition(batch)
 
-            if "clap_target" in batch:
-                with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
-                    cond = compute_condition(batch)
-                tgt = batch["clap_target"].to(device)
-                # Both sides are already L2-normalized, so this is a plain dot product.
-                cos = (cond.float() * F.normalize(tgt.float(), dim=-1)).sum(-1)
-                cos_sum += cos.sum().item()
-                cos_count += n
+                loss = diffusion_loss(batch, train=False, cond=cond)
+                total += loss.item() * n
+                count += n
 
-            # Fixed timestep per bucket so the comparison across epochs is not dominated by
-            # resampling noise.
-            for bi, (lo, hi) in enumerate(buckets):
-                t = torch.full((n,), (lo + hi) // 2, device=device, dtype=torch.long)
-                with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
-                    bl = diffusion_loss_at_timestep(batch, t)
-                bucket_sum[bi] += bl.item() * n
-                bucket_count[bi] += n
+                if "clap_target" in batch:
+                    tgt = batch["clap_target"].to(device)
+                    # Both sides are L2-normalized, so this is a plain dot product.
+                    cos = (cond.float() * F.normalize(tgt.float(), dim=-1)).sum(-1)
+                    cos_sum += cos.sum().item()
+                    cos_count += n
+
+                # Fixed timestep per bucket, so epoch-to-epoch comparisons are not
+                # dominated by timestep resampling noise. Skipped on most epochs because
+                # each bucket is another full U-Net pass over the val set.
+                if with_buckets:
+                    for bi, (lo, hi) in enumerate(buckets):
+                        t = torch.full((n,), (lo + hi) // 2, device=device, dtype=torch.long)
+                        bl = diffusion_loss_at_timestep(batch, t, cond=cond)
+                        bucket_sum[bi] += bl.item() * n
+                        bucket_count[bi] += n
 
         mapper.train()
         if not cfg.freeze_unet:
@@ -465,8 +520,9 @@ def main() -> int:
         out = {"val_loss": total / max(count, 1)}
         if cos_count:
             out["val_clap_cos"] = cos_sum / cos_count
-        for bi, (lo, hi) in enumerate(buckets):
-            out[f"val_loss_t{lo}_{hi}"] = bucket_sum[bi] / max(bucket_count[bi], 1)
+        if with_buckets:
+            for bi, (lo, hi) in enumerate(buckets):
+                out[f"val_loss_t{lo}_{hi}"] = bucket_sum[bi] / max(bucket_count[bi], 1)
         return out
 
     def save_checkpoint(
@@ -624,7 +680,11 @@ def main() -> int:
         metrics = {}
         val_loss = None
         if (epoch + 1) % cfg.val_every_epochs == 0 or stop:
-            metrics = validate()
+            want_buckets = (
+                cfg.bucket_every_epochs > 0
+                and ((epoch + 1) % cfg.bucket_every_epochs == 0 or epoch == start_epoch or stop)
+            )
+            metrics = validate(with_buckets=want_buckets)
             val_loss = metrics["val_loss"]
             cos = metrics.get("val_clap_cos")
             log(f"  epoch {epoch:02d} train={train_loss:.4f} val={val_loss:.4f}"
