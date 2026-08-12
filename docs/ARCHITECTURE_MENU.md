@@ -87,13 +87,32 @@ stages to orchestrate. Cheap to measure, hard to argue with, and they hold even 
 
 All share the precomputed latents, so each rung is cheap. **The gap between rungs is the point.**
 
-| id | conditioner | params | U-Net |
-|---|---|---|---|
-| L0f | masked mean-pool + one linear | 0.66 M | **frozen** ← the true minimum |
-| L0 | masked mean-pool + one linear | 0.66 M | finetuned |
-| L1 | attention-pool + MLP | 7.1 M | finetuned |
-| L2 | transformer + attention-pool *(what we ran)* | 32.3 M | finetuned |
-| L3 | k learned queries (Q-Former-ish) | 18.6 M | finetuned |
+**Corrected 2026-08-12.** This table was previously 5 rows and *not* monotonic in params (L3 at
+18.6 M was listed after L2 at 32.3 M), so it did not read as a ladder, and it was missing the row that
+matters most — the **0-parameter** bottom. Both fixed. Param counts below are measured, not estimated
+(instantiated at `input_dim=1280`, `output_dim=512`).
+
+| id | conditioner | trainable params | U-Net | status |
+|---|---|---|---|---|
+| **L−** | frozen **CLAP audio embedding of the speech** straight into the slot — no learned mapping at all (`generate.py --mode rung1`) | **0** | frozen | **already generating (406850)** |
+| L0f | masked mean-pool + one linear | 0.66 M | **frozen** | not built |
+| L0 | masked mean-pool + one linear | 0.66 M | finetuned | not built |
+| L1 | attention-pool + MLP | 7.09 M | finetuned | not built |
+| L3 | k learned queries (Q-Former-ish) | 18.63 M | finetuned | not built |
+| L2 | transformer + attention-pool *(what we ran)* | 32.28 M | finetuned | **done (406301, 91 ep)** |
+
+**L− is the row that maps onto V2A-Mapper's "w/o mapper" (FD 72.53), and we get it for free.** It works
+as a 0-param row only because CLAP's output is already 512-d, matching AudioLDM's slot exactly; raw
+Whisper features are 1280-d and cannot be fed in without *some* projection, so there is no other
+zero-parameter option available to us. It doubles as the E4 control — if a frozen CLAP embedding of
+speech carries no scene information, this row should be near-unconditional, which is the cheap way to
+substantiate the CLAP-on-speech claim we have so far only asserted.
+
+**Do not run all six.** Endpoints first (L− and L2 are both already done or in flight; add L0 and
+L0f), and fill in the interior rungs *only if the endpoints differ*. If L0 ≈ L2 the story is finished —
+complexity bought nothing — and L1/L3 add no information for ~29 GPU-h. If L0 ≪ L2, then L1 and L3
+locate where the gain appears, which is worth paying for. Interior rungs are worth compute only once
+you know the endpoints separate.
 
 **Comparability rule:** only compare runs sharing `epochs` **and** `lr_total_steps`
 (`configs/exp/long100.yaml` pins 23,400). A derived LR curve makes a 5-epoch run fully annealed at
