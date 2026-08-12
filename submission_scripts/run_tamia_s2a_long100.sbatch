@@ -89,6 +89,23 @@ else
         --direction s2a --split val 2>&1 | tee "$LOG_DIR/01_clap_val.log"
 fi
 
+# O2 needs CLAP targets for TRAIN as well, since they are the auxiliary loss target there --
+# not just a metric. ~15k rows against val's 1.9k, so budget roughly 12 min the first time;
+# cached afterwards, so every later O2 run skips it. Only run when actually needed, to avoid
+# spending that on every plain run. Force with PRECOMPUTE_TRAIN_CLAP=1.
+NEED_TRAIN_CLAP="${PRECOMPUTE_TRAIN_CLAP:-0}"
+if [[ "${EXTRA:-}" == *o2_align* ]]; then NEED_TRAIN_CLAP=1; fi
+if [[ "$NEED_TRAIN_CLAP" == "1" ]]; then
+    echo
+    echo "### [1b/3] CLAP target embeddings (train, needed by O2) ###"
+    if [[ -f "$FEATURES_CLAP_ROOT/s2a/train/clap_target.npy" ]]; then
+        echo "already present, skipping"
+    else
+        CUDA_VISIBLE_DEVICES=0 python scripts/precompute_clap_targets.py \
+            --direction s2a --split train 2>&1 | tee "$LOG_DIR/01b_clap_train.log"
+    fi
+fi
+
 # ======================================================== 2. train (auto-resume)
 echo
 echo "### [2/3] Training ###"
