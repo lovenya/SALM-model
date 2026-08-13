@@ -256,7 +256,8 @@ def init_wandb(cfg: "TrainConfig", run_dir: Path, world_size: int):
 
 # Validation metrics where a LARGER value is better. Everything else is treated as
 # lower-is-better, which is correct for every loss-shaped quantity we log.
-_HIGHER_IS_BETTER = {"val_clap_r1", "val_clap_r5", "val_clap_cos", "val_d1_delta", "val_d2_gap"}
+_HIGHER_IS_BETTER = {"val_clap_r1", "val_clap_r5", "val_clap_cos",
+                     "val_d1_gap", "val_d2_gap", "val_d2_gap_zero"}
 
 
 def timestep_buckets(num_train_timesteps: int, n_buckets: int = 4) -> list[tuple[int, int]]:
@@ -602,9 +603,10 @@ def main() -> int:
         conditioning -- which is precisely the mistake that would make this metric useless.
         So the noising is done once here instead of being delegated.
 
-        Returns (d1_delta, d2_relative_gap):
-          d1_delta = loss(shuffled) - loss(correct).  > 0 => sample-specific info is used.
-          d2_gap   = ||eps(c) - eps(null)|| / ||eps(c)||.  ~0 => condition has no influence.
+        Returns (d1_gap, d2_gap, d2_gap_zero), all RELATIVE PREDICTION gaps on one scale:
+          d1_gap      = ||eps(c) - eps(c_shuffled)|| / ||eps(c)||   sensitivity to WHICH utterance
+          d2_gap      = ||eps(c) - eps(null)||      / ||eps(c)||   sensitivity to conditioning
+          d2_gap_zero = ||eps(c) - eps(0)||         / ||eps(c)||   same, bypassing the learned null
         """
         n = cond.shape[0]
         mean = batch["latent_mean"].to(device, non_blocking=True)
@@ -626,11 +628,31 @@ def main() -> int:
         e_c = eps(cond)
         e_s = eps(cond[perm])
         e_n = eps(conditioner_module.null_condition(n, device))
+        e_z = eps(torch.zeros_like(cond))
 
-        d1 = (F.mse_loss(e_s.float(), noise.float()) - F.mse_loss(e_c.float(), noise.float())).item()
         denom = e_c.float().flatten(1).norm(dim=1).clamp(min=1e-8)
-        d2 = ((e_c - e_n).float().flatten(1).norm(dim=1) / denom).mean().item()
-        return d1, d2
+        rel = lambda a, b: ((a - b).float().flatten(1).norm(dim=1) / denom).mean().item()
+
+        # REBUILT 2026-08-12. The original D1 was
+        #   loss(shuffled) - loss(correct)
+        # which is a difference of two numbers sitting at ~0.19 with sigma 0.006. The deltas it
+        # produced were ~0.0002 -- two orders of magnitude below its own resolution -- so it could
+        # not distinguish "ignores the condition" from "uses it a little". It reported +0.00010 on a
+        # 91-epoch run and +0.00017 on O2, whose conditioner demonstrably reached 9x chance; the
+        # metric was blind, not the model.
+        #
+        # The fix is to compare the PREDICTIONS directly rather than their losses. Swapping in
+        # another sample's condition changes eps by a measurable relative amount even when the
+        # effect on the averaged loss is invisible, because we are no longer subtracting two large
+        # noise-dominated scalars.
+        d1 = rel(e_c, e_s)                     # sensitivity to WHICH utterance
+        d2 = rel(e_c, e_n)                     # sensitivity to being conditioned at all
+        # d2 above uses the LEARNED null embedding, which receives gradient only through the
+        # diffusion loss and can drift toward the mean condition -- in which case it reads low even
+        # when conditioning works. The zero-vector comparison has no such failure mode, so
+        # reporting both makes that confound visible instead of silent.
+        d2z = rel(e_c, e_z)
+        return d1, d2, d2z
 
     buckets = timestep_buckets(noise_scheduler.config.num_train_timesteps, 4)
 
@@ -648,12 +670,18 @@ def main() -> int:
             an unambiguous chance baseline of 1/batch_size, so a number above chance is
             evidence rather than something to compare against a hand-computed band. Raw cosine
             sat at -0.02 inside a +/-0.044 chance band for 91 epochs and told us nothing.
-          - d1_delta: loss with the conditioning SHUFFLED minus loss with the correct
-            conditioning, at a fixed low timestep. > 0 means the model is using WHICH
-            utterance it was given. This is the number eps-MSE cannot give us, and logging it
-            per-epoch turns the central open question into a curve.
-          - d2_gap: ||eps(c) - eps(null)|| / ||eps(c)||. ~0 means the condition has no
-            influence at all and CFG is a no-op.
+          - d1_gap: relative change in the PREDICTION when the conditioning is shuffled within
+            the batch, at a fixed low timestep. Rebuilt 2026-08-12: the previous version was a
+            difference of two losses sitting at 0.19 +/- 0.006 and its deltas came out ~0.0002,
+            two orders of magnitude below its own resolution -- so it read ~0 even for O2, whose
+            conditioner demonstrably reached 9x chance. Comparing predictions instead of losses
+            removes that floor.
+          - d2_gap / d2_gap_zero: same form, against the learned null and against a zero vector.
+            Both are reported because the learned null receives gradient only through the
+            diffusion loss and can drift toward the mean condition, which would make d2_gap read
+            low even when conditioning works. Divergence between the two exposes that confound.
+            d2_gap is also exactly what classifier-free guidance amplifies, so it sets the
+            guidance scale actually needed: a 2% gap at s=3 is still only ~6%.
           - x0_rel_mse: error in CLEAN-LATENT space rather than noise space, which removes the
             SNR scaling that makes eps-MSE flat.
           - loss_t<lo>_<hi>: loss restricted to a timestep band.
@@ -671,7 +699,7 @@ def main() -> int:
         cos_sum, cos_count = 0.0, 0
         r1_sum, r5_sum, r_count = 0.0, 0.0, 0
         x0_sum, x0_count = 0.0, 0
-        d1_sum, d2_sum, d_count = 0.0, 0.0, 0
+        d1_sum, d2_sum, d2z_sum, d_count = 0.0, 0.0, 0.0, 0
         bucket_sum = [0.0] * len(buckets)
         bucket_count = [0] * len(buckets)
         # Conditioning matters most where signal survives, so diagnose at a low timestep
@@ -716,9 +744,10 @@ def main() -> int:
                 # ------------------------------------------------- D1 / D2 (extra passes)
                 if with_diag and n >= 2:
                     ts = torch.full((n,), diag_t, device=device, dtype=torch.long)
-                    d1, d2 = diagnose(batch, ts, cond)
+                    d1, d2, d2z = diagnose(batch, ts, cond)
                     d1_sum += d1 * n
                     d2_sum += d2 * n
+                    d2z_sum += d2z * n
                     d_count += n
 
                 # Fixed timestep per bucket, so epoch-to-epoch comparisons are not
@@ -742,7 +771,7 @@ def main() -> int:
             packed = torch.tensor(
                 [total, float(count), cos_sum, float(cos_count),
                  r1_sum, r5_sum, float(r_count), x0_sum, float(x0_count),
-                 d1_sum, d2_sum, float(d_count)]
+                 d1_sum, d2_sum, d2z_sum, float(d_count)]
                 + bucket_sum + [float(c) for c in bucket_count],
                 device=device,
                 dtype=torch.float64,
@@ -753,9 +782,9 @@ def main() -> int:
             total, count, cos_sum, cos_count = vals[0], int(vals[1]), vals[2], int(vals[3])
             r1_sum, r5_sum, r_count = vals[4], vals[5], int(vals[6])
             x0_sum, x0_count = vals[7], int(vals[8])
-            d1_sum, d2_sum, d_count = vals[9], vals[10], int(vals[11])
-            bucket_sum = vals[12 : 12 + nb]
-            bucket_count = [int(c) for c in vals[12 + nb : 12 + 2 * nb]]
+            d1_sum, d2_sum, d2z_sum, d_count = vals[9], vals[10], vals[11], int(vals[12])
+            bucket_sum = vals[13 : 13 + nb]
+            bucket_count = [int(c) for c in vals[13 + nb : 13 + 2 * nb]]
 
         out = {"val_loss": total / max(count, 1)}
         if cos_count:
@@ -769,8 +798,11 @@ def main() -> int:
         if x0_count:
             out["val_x0_rel_mse"] = x0_sum / x0_count
         if d_count:
-            out["val_d1_delta"] = d1_sum / d_count
+            # Renamed from val_d1_delta: this is now a relative PREDICTION gap, not a loss delta,
+            # so the old name would silently mean something different in the same history.json.
+            out["val_d1_gap"] = d1_sum / d_count
             out["val_d2_gap"] = d2_sum / d_count
+            out["val_d2_gap_zero"] = d2z_sum / d_count
         if with_buckets:
             for bi, (lo, hi) in enumerate(buckets):
                 out[f"val_loss_t{lo}_{hi}"] = bucket_sum[bi] / max(bucket_count[bi], 1)
@@ -1025,11 +1057,14 @@ def main() -> int:
                 + (f" x0={metrics['val_x0_rel_mse']:.4f}" if "val_x0_rel_mse" in metrics else "")
                 + (f" align={last_align:.4f}" if last_align is not None else "")
                 + f" ({(time.time()-t_epoch)/60:.1f} min)")
-            if "val_d1_delta" in metrics:
-                # The two numbers that decide whether any of this is working.
-                log(f"      D1 delta={metrics['val_d1_delta']:+.5f}  "
-                    f"D2 gap={metrics['val_d2_gap']:.5f}   "
-                    f"(D1>0 => uses WHICH utterance; D2~0 => ignores the condition entirely)")
+            if "val_d1_gap" in metrics:
+                # The numbers that decide whether any of this is working. Both are relative
+                # prediction gaps now, so they share a scale and are directly comparable.
+                log(f"      D1 gap={metrics['val_d1_gap']:.5f}  "
+                    f"D2 gap={metrics['val_d2_gap']:.5f}  "
+                    f"D2(zero)={metrics['val_d2_gap_zero']:.5f}")
+                log(f"        D1 = sensitivity to WHICH utterance; D2 = to being conditioned at "
+                    f"all. D2(zero) bypasses the learned null embedding.")
             if want_buckets:
                 log("      buckets: " + "  ".join(
                     f"{k.replace('val_loss_t','t')}={v:.4f}"

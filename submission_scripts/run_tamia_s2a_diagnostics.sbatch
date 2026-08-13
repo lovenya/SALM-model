@@ -89,7 +89,7 @@ for d in d1d2_last d1d2_first; do
     [[ -f "$OUT/$d/diagnostics.json" ]] || { echo "  $d: MISSING (see $LOG_DIR/$d.log)"; continue; }
     echo "--- $d"
     sed -n '/^VERDICT/,$p' "$LOG_DIR/${d}.log" 2>/dev/null || true
-    grep -E "^(mean D1|mean D2|low-t bucket|val CLAP)" "$LOG_DIR/${d}.log" 2>/dev/null || true
+    grep -E "^(mean D1|mean D2|low-t D1|low-t D2|val CLAP|  To reach|  current D2)" "$LOG_DIR/${d}.log" 2>/dev/null || true
 done
 
 echo

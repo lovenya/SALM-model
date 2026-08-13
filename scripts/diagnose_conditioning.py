@@ -124,7 +124,7 @@ def main() -> int:
 
     # accumulators keyed by timestep
     acc = {t: {k: 0.0 for k in ("loss_cond", "loss_shuf", "loss_null",
-                                "gap_null", "gap_shuf", "n")} for t, _, _ in bucket_ts}
+                                "gap_null", "gap_shuf", "gap_zero", "n")} for t, _, _ in bucket_ts}
     cos_sum, cos_n = 0.0, 0
 
     t0 = time.time()
@@ -168,15 +168,28 @@ def main() -> int:
                 e_s = unet(noisy, ts, encoder_hidden_states=None, class_labels=shuf).sample
                 e_n = unet(noisy, ts, encoder_hidden_states=None, class_labels=null).sample
 
+                e_z = unet(noisy, ts, encoder_hidden_states=None,
+                           class_labels=torch.zeros_like(cond)).sample
+
                 a = acc[t]
                 a["loss_cond"] += F.mse_loss(e_c, noise).item() * n
                 a["loss_shuf"] += F.mse_loss(e_s, noise).item() * n
                 a["loss_null"] += F.mse_loss(e_n, noise).item() * n
                 # Relative gaps, so the numbers are comparable across timesteps despite the
                 # prediction magnitude changing enormously with t.
+                #
+                # REBUILT 2026-08-12: gap_shuf, not the loss delta, is now THE D1. The loss-delta
+                # version subtracted two numbers sitting at ~0.19 with sigma 0.006 and produced
+                # ~0.0002, two orders of magnitude below its own resolution -- it reported ~0 even
+                # for the O2 run whose conditioner reached 9x chance retrieval. The loss columns
+                # are kept for continuity but must not be read as the diagnostic.
                 denom = e_c.flatten(1).norm(dim=1).clamp(min=1e-8)
                 a["gap_null"] += ((e_c - e_n).flatten(1).norm(dim=1) / denom).sum().item()
                 a["gap_shuf"] += ((e_c - e_s).flatten(1).norm(dim=1) / denom).sum().item()
+                # Zero-vector reference: the learned null embedding only receives gradient through
+                # the diffusion loss and can drift toward the mean condition, which would make
+                # gap_null read low even when conditioning works. This has no such failure mode.
+                a["gap_zero"] += ((e_c - e_z).flatten(1).norm(dim=1) / denom).sum().item()
                 a["n"] += n
 
             nb += 1
@@ -187,8 +200,8 @@ def main() -> int:
     log(f"\nbatches {nb}  samples {acc[bucket_ts[0][0]]['n']}  "
         f"elapsed {time.time()-t0:.1f}s")
 
-    hdr = (f"\n{'t':>5} {'loss_cond':>10} {'loss_shuf':>10} {'D1 delta':>10} "
-           f"{'loss_null':>10} {'D2 gap':>9} {'shuf gap':>9}")
+    hdr = (f"\n{'t':>5} {'loss_cond':>10} {'loss_shuf':>10} {'D1 gap':>10} "
+           f"{'loss_null':>10} {'D2 null':>9} {'D2 zero':>9}")
     log(hdr)
     log("-" * len(hdr))
     results = {}
@@ -196,40 +209,53 @@ def main() -> int:
         a = acc[t]
         k = a["n"] or 1
         lc, ls, ln = a["loss_cond"]/k, a["loss_shuf"]/k, a["loss_null"]/k
-        gn, gs = a["gap_null"]/k, a["gap_shuf"]/k
+        gn, gs, gz = a["gap_null"]/k, a["gap_shuf"]/k, a["gap_zero"]/k
         results[f"t{lo}_{hi}"] = {
-            "timestep": t, "loss_cond": lc, "loss_shuf": ls, "d1_delta": ls-lc,
-            "loss_null": ln, "d2_gap_null_rel": gn, "gap_shuffled_rel": gs,
+            "timestep": t, "loss_cond": lc, "loss_shuf": ls,
+            "loss_delta_DEPRECATED": ls-lc,      # below its own resolution; do not read
+            "loss_null": ln, "d1_gap": gs, "d2_gap_null_rel": gn, "d2_gap_zero_rel": gz,
         }
-        log(f"{t:>5} {lc:>10.4f} {ls:>10.4f} {ls-lc:>+10.4f} {ln:>10.4f} "
-            f"{gn:>9.4f} {gs:>9.4f}")
+        log(f"{t:>5} {lc:>10.4f} {ls:>10.4f} {gs:>10.4f} {ln:>10.4f} "
+            f"{gn:>9.4f} {gz:>9.4f}")
 
-    d1 = sum(r["d1_delta"] for r in results.values()) / len(results)
+    d1 = sum(r["d1_gap"] for r in results.values()) / len(results)
     d2 = sum(r["d2_gap_null_rel"] for r in results.values()) / len(results)
     # Low-t is where conditioning should matter most, so report it separately.
     low = results[f"t{bucket_ts[0][1]}_{bucket_ts[0][2]}"]
 
-    log(f"\nmean D1 delta (shuffled - correct): {d1:+.5f}")
-    log(f"mean D2 relative null gap:          {d2:.5f}")
-    log(f"low-t bucket D1 delta:              {low['d1_delta']:+.5f}")
-    log(f"low-t bucket D2 gap:                {low['d2_gap_null_rel']:.5f}")
+    d2z = sum(r["d2_gap_zero_rel"] for r in results.values()) / len(results)
+
+    log(f"\nmean D1 gap  (correct vs shuffled): {d1:.5f}")
+    log(f"mean D2 gap  (correct vs null):     {d2:.5f}")
+    log(f"mean D2 gap  (correct vs ZERO):     {d2z:.5f}")
+    log(f"low-t D1 gap:                       {low['d1_gap']:.5f}")
+    log(f"low-t D2 gap (null):                {low['d2_gap_null_rel']:.5f}")
     if cos_n:
         log(f"val CLAP cosine:                    {cos_sum/cos_n:+.5f}  (chance +/-0.0442)")
+    log(f"\nCFG implication: guidance multiplies the conditional-vs-null gap by s, so at the")
+    log(f"  current D2={d2:.4f}, s=3.0 yields only ~{d2*3:.1%} deviation from unconditional.")
+    log(f"  To reach a ~15% deviation you would need s ~ {0.15/max(d2,1e-6):.1f}.")
 
     log("\nVERDICT")
-    if d2 < 0.01:
-        log("  D2 ~ 0: the conditioning has essentially NO influence on the prediction.")
-        log("  The U-Net is ignoring the condition entirely, so CFG is also a no-op.")
+    # Thresholds are on the REBUILT relative-gap scale, not the old loss-delta scale. 1% of the
+    # prediction norm is the rough floor below which the condition cannot be steering generation.
+    if d2 < 0.01 and d2z < 0.01:
+        log("  D2 ~ 0 against BOTH the learned null and zero: the conditioning has essentially no")
+        log("  influence on the prediction, so CFG is a no-op at any practical scale.")
         log("  More epochs and more conditioner capacity are both pointless. Change the")
         log("  objective (auxiliary alignment loss) or the conditioning interface.")
-    elif d1 < 0.001:
+    elif d2 < 0.01 <= d2z:
+        log("  D2(null) ~ 0 but D2(zero) is NOT: the learned null embedding has drifted toward the")
+        log("  mean condition, so D2-against-null understates the effect. Read D2(zero) instead,")
+        log("  and treat any earlier 'the U-Net ignores the condition' claim as unproven.")
+    elif d1 < 0.005:
         log("  D2 > 0 but D1 ~ 0: the condition changes the prediction, but swapping in ANOTHER")
-        log("  sample's condition costs nothing -- so it carries no sample-specific information.")
+        log("  sample's condition barely does -- so it carries little sample-specific information.")
         log("  The model has learned the conditioning DISTRIBUTION, not the mapping.")
     else:
-        log(f"  D1 = {d1:+.5f} > 0: shuffling the conditioning measurably hurts, so the model IS")
-        log("  using which utterance it was given. The mapping is being learned; the flat loss")
-        log("  curve was hiding it. Scaling up is justified.")
+        log(f"  D1 = {d1:.5f}: swapping in another utterance's condition moves the prediction by")
+        log(f"  {d1:.1%} of its norm, so the model IS using which utterance it was given.")
+        log("  The mapping is being learned and the flat loss curve was hiding it.")
 
     summary = {
         "checkpoint": args.checkpoint,
@@ -239,10 +265,12 @@ def main() -> int:
         "split": args.split,
         "batches": nb,
         "samples": acc[bucket_ts[0][0]]["n"],
-        "mean_d1_delta": d1,
+        "mean_d1_gap": d1,
         "mean_d2_gap": d2,
-        "low_t_d1_delta": low["d1_delta"],
+        "mean_d2_gap_zero": d2z,
+        "low_t_d1_gap": low["d1_gap"],
         "low_t_d2_gap": low["d2_gap_null_rel"],
+        "metric_version": 2,   # v1 was the loss-delta D1, below its own resolution
         "val_clap_cos": (cos_sum / cos_n) if cos_n else None,
         "per_bucket": results,
         "elapsed_seconds": time.time() - t0,
