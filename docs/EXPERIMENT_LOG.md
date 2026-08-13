@@ -341,3 +341,87 @@ interpolate -- a perfectly memorising model would not. But on unseen utterances 
 degree. This is also precisely why diffusion helps: it SAMPLES, landing on the manifold at std ~1
 rather than between points at 0.73.
 
+## 2026-08-12 evening: the cohort landed, and O2 is the first real learning signal
+
+Six jobs. Five did real work, one failed (my bug), one was an intentional duplicate cancellation.
+
+### The headline: the OBJECTIVE was the problem, not conditioner capacity
+
+| run | ep | val_loss | val_clap_r1 (chance 0.0625) | val_clap_cos (chance ±0.0442) |
+|---|---|---|---|---|
+| L2 xformer 32.3 M (old) | 91 | 0.1905 → 0.1833 | not logged | −0.016 |
+| **L0** mean_linear 0.66 M | 100 | 0.1945 → 0.1948 | 0.064 → **0.065** | +0.023 |
+| **L0f** mean_linear, U-Net frozen | 100 | 0.1946 → 0.1952 | 0.068 → **0.070** | +0.018 |
+| **O2** xformer + alignment loss | 100 | 0.1978 → 0.1985 | 0.325 → **0.564** | **+0.613** |
+
+**O2 works, decisively and fast.** r1 climbs 0.325 → 0.547 within 10 epochs then plateaus at
+~0.56 — **9x chance** — with σ 0.027 across a 0.325–0.564 range, so the jump is ~20σ and not noise.
+val CLAP cosine +0.613 is **14x** the chance band. Train alignment loss fell 0.354 → 0.014, i.e.
+train cosine 0.986 against val 0.613, so there is real overfitting on the alignment task, but the
+val number is still enormous.
+
+**L0 and L0f are at chance after 100 epochs**, with tiny σ (0.0012 / 0.0025) confirming genuine
+flatness rather than noise. L0f sits a hair above chance (0.070 vs 0.0625) and that is all.
+
+So: **the diffusion loss alone taught the conditioner nothing in 100 epochs, at either 0.66 M or
+32.3 M capacity, with the U-Net frozen or trainable. The auxiliary alignment loss taught it in
+~10 epochs.** The reviewer narrative is therefore not "capacity earns its keep" — it is that the
+objective was wrong, which is a stronger and more interesting result.
+
+### val_loss is not merely uninformative, it is ANTI-correlated
+
+O2's val_loss went UP (0.1978 → 0.1985) over exactly the 100 epochs in which its conditioner went
+from chance to 9x chance. Any selection or early-stopping on val_loss would have preferred the
+model that learned nothing. This retroactively justifies switching `select_metric` to
+`val_clap_r1`.
+
+### D1/D2 on the old L2 run: the U-Net appears to ignore the condition
+
+Job 406885, on `long100` epoch 19 vs epoch 91:
+
+| | ep 19 | ep 91 |
+|---|---|---|
+| D1 (shuffle) | +0.00005 | +0.00010 |
+| D2 (cond vs null) | 0.00692 | 0.00930 |
+
+O2's own D2 is 0.0234 -- 2.5x L0's 0.0103, the largest of the cohort, but still only 2.3%.
+
+**Two honest limitations of these diagnostics, both mine:**
+
+1. **D1 cannot resolve what it was built to measure.** It is a difference of two losses that sit at
+   0.19 with σ 0.006; a delta of 0.0002 is far below that resolution. D1 as implemented is not a
+   usable test. The fix is to measure `‖eps(c1) − eps(c2)‖ / ‖eps(c1)‖` between two DIFFERENT real
+   conditions -- same form as D2, not loss-limited.
+2. **D2 compares against the LEARNED null embedding**, which receives gradient only through the
+   diffusion loss and may have drifted toward the mean condition. If so D2 reads low even when
+   conditioning works.
+
+So "the U-Net ignores the condition" is **suggested but not established**. Do not report it as a
+finding yet. The decisive test is cheap: generate from the O2 checkpoint and listen/score.
+
+### Retrieval baseline: the embedding space does not separate scenes
+
+| space | similarity to nearest train utterance | caption Jaccard | exact caption match |
+|---|---|---|---|
+| whisper (masked mean-pool) | 0.9718 | 0.0552 | 0/16 |
+| clap | 0.9714 | 0.0272 | 0/16 |
+
+Pooling is masked (`retrieval_baseline.py:94-95`), so the 0.97 is NOT a padding artifact -- it is a
+real property. Nearest neighbours are 97% cosine-similar while sharing ~5% of caption words and
+zero exact scenes. The conditioner's INPUT space barely separates utterances, which is a plausible
+partial explanation for why the diffusion gradient alone never found the mapping, and an argument
+that retrieval will post a good FAD while being semantically wrong per example.
+
+### Efficiency measured
+
+gen-evolution ran all 10 lanes in 111 s of sampling: **0.69 s per generated clip** at 50 DDIM
+steps. That is the number the T0 one-forward-pass baseline will be compared against.
+
+### Failure: T0 died in 32 s (job 406978), my bug
+
+`train_regress.py` unpacked `setup_distributed()` as `(rank, local_rank, world_size)` when it
+returns `(rank, world_size, local_rank)` -- as its own docstring states and as `train_ldm.py:322`
+does correctly. Rank 0 therefore saw `local_rank=4`, `world_size=0`, and `cuda:4` raised
+"invalid device ordinal". Fixed, with a comment at the call site. T0 has produced no results yet
+and needs resubmitting.
+

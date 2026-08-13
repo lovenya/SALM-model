@@ -70,7 +70,11 @@ def main() -> int:
         cur = getattr(cfg, k)
         setattr(cfg, k, type(cur)(v) if not isinstance(cur, bool) else v.lower() == "true")
 
-    rank, local_rank, world_size = setup_distributed()
+    # Order matters and bit me: setup_distributed returns (rank, world_size, local_rank), as its
+    # own docstring says. Unpacking it as (rank, local_rank, world_size) made rank 0 see
+    # local_rank=4 and world_size=0, so `cuda:4` raised "invalid device ordinal" and job 406978
+    # died in 32 s. Keep this identical to train_ldm.py's call site.
+    rank, world_size, local_rank = setup_distributed()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed + rank)
 
