@@ -1,11 +1,34 @@
 # Experiment log
 
-Chronological record of what we tried, what we measured, what we decided, and what we got wrong.
-The point is that when we deliver a model we can say exactly how we arrived at it — including the
-dead ends, because reviewers ask and because the mistakes are where most of the learning is.
+## What this document is
 
-Conventions: newest section at the bottom. Every claim either carries a number or is marked as an
-assumption. Mistakes get their own entries rather than being quietly fixed.
+**The reasoning record for SpeechAudio LM (S2A).** Not a changelog — git already does that. This
+holds the things that would otherwise live only in a conversation and be lost:
+
+- **Decisions, and the argument behind each one.** Not just "we used λ=1.0" but why 2000 was wrong
+  for our formulation, with the arithmetic.
+- **What we chose AGAINST, and why.** The rejected options matter as much as the chosen ones,
+  because the reviewer question is always "why did you do it this way?" — and because we forget our
+  own reasons within days. AudioGen, `target_caption_clap_score` during training, raising the batch
+  size, more data instead of a better objective: all deliberate rejections, all recorded with the
+  measurement or argument that settled them.
+- **What worked and what didn't**, with numbers. A flat curve is a result and gets written down.
+- **Mistakes, kept visible.** Bugs I introduced, claims I made that turned out unsupported, metrics
+  I built that could not measure what they claimed. These are struck through or explicitly corrected
+  rather than quietly edited away, because several conclusions were built on them and anyone reading
+  later needs to know which.
+- **Diagnostics and their limitations.** A metric that reads ~0 because it is blind looks exactly
+  like a metric that reads ~0 because the model failed. Where we know the difference, it is stated.
+
+Read this before trusting any number from this project, and before re-opening a decision — the
+argument is probably already here.
+
+Companion: `OPEN_ITEMS.md` (what is still undecided or unbuilt). `ARCHITECTURE_MENU.md` (the option
+space, with the ladder).
+
+**Conventions.** Newest section at the bottom. Every claim carries a number or is marked as an
+assumption. Mistakes get their own entries. Superseded conclusions are marked SUPERSEDED with a
+pointer, never deleted.
 
 ---
 
@@ -424,4 +447,81 @@ returns `(rank, world_size, local_rank)` -- as its own docstring states and as `
 does correctly. Rank 0 therefore saw `local_rank=4`, `world_size=0`, and `cuda:4` raised
 "invalid device ordinal". Fixed, with a comment at the call site. T0 has produced no results yet
 and needs resubmitting.
+
+## 2026-08-12 late: rebuilt D1, built the guidance sweep and its scorer
+
+### D1 was measuring nothing — rebuilt
+
+The D1 reported earlier in this log (+0.00010 at epoch 91, +0.00017 for O2) is **not evidence of
+anything** and must not be cited. It computed `loss(shuffled) − loss(correct)`: a difference of two
+numbers sitting at ~0.19 with σ 0.006, producing deltas of ~0.0002 — two orders of magnitude below
+its own resolution.
+
+The proof it was blind rather than correct: it read ~0 for O2, whose conditioner independently
+reached 9× chance retrieval and +0.613 val CLAP cosine. A working conditioner and a D1 of zero cannot
+both be true, so the metric was wrong.
+
+Rebuilt to compare **predictions** instead of losses, which removes the noise floor entirely:
+
+```
+d1_gap      = ||eps(c) - eps(c_shuffled)|| / ||eps(c)||     sensitivity to WHICH utterance
+d2_gap      = ||eps(c) - eps(null)||       / ||eps(c)||     sensitivity to being conditioned
+d2_gap_zero = ||eps(c) - eps(0)||          / ||eps(c)||     same, bypassing the learned null
+```
+
+The zero-vector reference addresses a confound I had not accounted for: the learned null embedding
+receives gradient **only** through the diffusion loss, so it can drift toward the mean condition, in
+which case `d2_gap` reads low even when conditioning works fine. Reporting both makes that visible;
+the verdict logic now detects `d2_null ≈ 0 while d2_zero > 0` and says so explicitly instead of
+repeating "the U-Net ignores the condition".
+
+Renamed `val_d1_delta` → `val_d1_gap` rather than reusing the key, so old and new runs cannot be
+silently plotted on one axis. Standalone summaries carry `metric_version: 2`.
+
+### The guidance scale has a quantitative answer, not just "it's untuned"
+
+CFG computes `ε = ε(null) + s·(ε(c) − ε(null))`, and **that bracket is exactly D2**. So D2 sets the
+guidance scale that would actually be needed:
+
+| measured D2 (O2) | s | deviation from unconditional |
+|---|---|---|
+| 0.0234 | 3.0 (what we always used) | ~7% |
+| 0.0234 | 6.5 | ~15% |
+
+s=3.0 was my arbitrary pick (diffusers' AudioLDM default is 2.5, AudioGen uses 3.0) and was never
+tuned. A 7% deviation is a plausible reason generation could look condition-blind even with a
+conditioner that provably works — which makes the sweep the decisive experiment, and it is
+inference-only at 0.69 s/clip.
+
+Built `run_tamia_s2a_guidance_sweep.sbatch` (s ∈ 1/3/5/7.5/10/15, identical rows/seed, round-robin
+over 4 GPUs with a wave barrier so no device is oversubscribed). s=1.0 is included deliberately: pure
+conditional prediction, no guidance, the true bottom of the curve.
+
+### The sweep needed a scorer, or it would produce sound and no measurement
+
+`scripts/score_generations_clap.py` reduces each lane to three numbers:
+
+- `clap_audio_cos` — cosine(CLAP_audio(generated), CLAP_audio(true target))
+- `clap_text_cos` — cosine(CLAP_audio(generated), CLAP_text(true caption))
+- `self_sim` — mean pairwise cosine among the lane's **own** generations
+
+`self_sim` guards against a specific misreading. If a lane's outputs are all near-identical — mode
+collapse, or the condition being ignored so everything decodes to the same generic ambience — then
+`clap_audio_cos` can still look respectable while carrying no per-example information. High
+`clap_audio_cos` *with* high `self_sim` is "one generic output vaguely close to everything", which is
+a failure however good the headline number looks. What we want is high `clap_audio_cos` with
+`self_sim` well below it.
+
+**How to read the sweep:** audio_cos rising with s ⇒ conditioner and interface both work and we were
+under-guiding. audio_cos flat across s ⇒ the U-Net is not responding to its `class_labels` input, so
+the conditioning **interface** is the bottleneck and Tier 3 (adding a cross-attention path) is next,
+not more training.
+
+### Mistake caught before it cost a job
+
+The scorer imported `build_pipeline` from `salm.generate`; the function is `load_pipeline`.
+`py_compile` passed because it does not resolve imports, so this would have failed at runtime after
+the six generation lanes had already run. Caught by explicitly resolving every import and printing
+its signature — which is now the habit for any new script, per the repo rule about verifying APIs
+against installed source.
 
