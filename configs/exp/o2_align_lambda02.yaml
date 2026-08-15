@@ -1,0 +1,21 @@
+# O2 with a WEAKER alignment weight: λ = 0.2 instead of 1.0.
+#
+# Compose AFTER o2_align.yaml so this wins:
+#   ... configs/exp/o2_align.yaml configs/exp/o2_align_lambda02.yaml
+#
+# WHY SWEEP DOWN, NOT UP. λ=1.0 worked — val_clap_r1 0.564 against chance 0.0625 — but it overfits
+# the alignment task badly:
+#
+#     train alignment loss  0.354 → 0.014   ⇒  train cosine 0.986
+#     val CLAP cosine                           0.613
+#
+# A 0.986/0.613 train/val split on the auxiliary objective means the conditioner is substantially
+# memorising training targets rather than learning the speech→scene mapping. At λ=1.0 alignment is
+# ~5× the diffusion term at init, which is deliberately aggressive; 0.2 makes the two terms roughly
+# comparable and should generalise better if memorisation is the limit.
+#
+# This is evidence-driven, not a guess: we have the train/val gap that motivates it. The competing
+# hypothesis is that λ is fine and the bottleneck is downstream (the U-Net ignoring the condition),
+# which is what the frozen-U-Net run tests. Run both — they are cheap and they are not exclusive.
+
+lambda_align: 0.2
