@@ -113,6 +113,24 @@ print("  not share a scene. That is the case where FAD flatters retrieval and pe
 print("  expose it -- report both together.")
 PY
 
+# ------------------------------------------------------- semantic scoring of retrieval
+# Similarity and caption-Jaccard say how CLOSE the retrieved utterance was; they say nothing
+# about whether the returned AUDIO is right for the query. Retrieval returns real recordings, so
+# it sits on the real manifold by construction and is expected to beat us on distributional
+# metrics while losing per-example. MARGIN and audio_r1 are what demonstrate that, so score the
+# retrieved clips the same way every generated lane is scored.
+RDIRS=()
+for space in whisper clap; do
+    [[ -f "$OUT/retrieval_${space}/manifest.jsonl" ]] && RDIRS+=("$OUT/retrieval_${space}")
+done
+if [[ ${#RDIRS[@]} -gt 0 ]]; then
+    echo
+    echo "### CLAP scoring of the retrieval lanes ###"
+    CUDA_VISIBLE_DEVICES=0 python scripts/score_generations_clap.py \
+        --dirs "${RDIRS[@]}" --split "${SPLIT:-val}" --out "$OUT/retrieval_scores.json" \
+        2>&1 | tee "$LOG_DIR/retrieval_score.log" || echo "WARN: retrieval scoring failed" >&2
+fi
+
 echo
 echo "wall-clock: ${TOTAL}s ($(python -c "print(f'{$TOTAL/60:.1f}')") min)"
 echo "results: $OUT"
