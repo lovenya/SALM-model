@@ -176,8 +176,9 @@ def load_s2a_checkpoint(checkpoint: Path, device: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", required=True, choices=["rung0", "rung1", "s2a"])
-    ap.add_argument("--checkpoint", default=None, help="required for --mode s2a")
+    ap.add_argument("--mode", required=True, choices=["rung0", "rung1", "s2a", "b0"])
+    ap.add_argument("--checkpoint", default=None,
+                    help="required for --mode s2a and --mode b0 (b0 needs the learned null)")
     ap.add_argument("--direction", default="s2a", choices=["s2a", "a2s"])
     ap.add_argument("--split", default="val", choices=["train", "val", "test"])
     ap.add_argument("--num-samples", type=int, default=8, help="-1 for the whole split")
@@ -196,8 +197,8 @@ def main() -> int:
                          "reproduces the behaviour of samples generated before 2026-08-12.")
     args = ap.parse_args()
 
-    if args.mode == "s2a" and not args.checkpoint:
-        log("ERROR: --mode s2a requires --checkpoint")
+    if args.mode in ("s2a", "b0") and not args.checkpoint:
+        log(f"ERROR: --mode {args.mode} requires --checkpoint")
         return 1
 
     out_dir = Path(args.out_dir)
@@ -216,7 +217,10 @@ def main() -> int:
     encoder = conditioner = clap = None
     unet_weights_loaded = False
     checkpoint_epoch = None
-    if args.mode == "s2a":
+    # b0 loads the same checkpoint as s2a: it needs the conditioner for its learned null
+    # embedding, and it must use the SAME U-Net, because B0 is the floor for THIS model rather
+    # than a generic unconditional sample.
+    if args.mode in ("s2a", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
         checkpoint_epoch = payload.get("epoch")
@@ -236,7 +240,19 @@ def main() -> int:
         batch = rows[start : start + args.batch_size]
 
         # ---------------------------------------------- build the condition vector
-        if args.mode == "rung0":
+        if args.mode == "b0":
+            # B0 -- the UNCONDITIONAL floor. Every sample gets the model's own learned null
+            # embedding, so the speech is never consulted. This is the empirical answer to "what
+            # does zero information score?", and it is what makes every other number readable:
+            # with the mismatched-target control in scripts/score_generations_clap.py, B0's MARGIN
+            # is ~0 BY CONSTRUCTION, so any real model must beat it or it has learned nothing.
+            #
+            # Deliberately uses the trained conditioner's null embedding rather than zeros: that is
+            # the vector this specific model actually falls back to under classifier-free guidance,
+            # so it is the honest floor for THIS model rather than a generic one.
+            cond = conditioner.null_condition(len(batch), torch.device(args.device))
+            negative = None
+        elif args.mode == "rung0":
             cond = clap_text_embeddings(pipe, [r.audio_cap for r in batch], args.device)
             negative = None
         else:
