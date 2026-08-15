@@ -14,7 +14,8 @@ waiting on a decision).
 
 ## Tier −1 · Diagnostics — is the condition used at all?
 
-**Status: queued (job 406885, starts 16:56 EDT 2026-08-12).** Everything below is easier to choose once this lands.
+**Status: DONE (job 406885, 2026-08-12 22:02).** But note the D1 reported there used the
+pre-rebuild metric and is void; see EXPERIMENT_LOG. D2 = 0.0093 (ep91) stands. Everything below is easier to choose once this lands.
 
 | id | test | what zero means |
 |---|---|---|
@@ -41,7 +42,7 @@ Cheap, and what a reviewer checks first.
 | id | baseline | tests | status |
 |---|---|---|---|
 | B0 | **unconditional** — sample from the learned null embedding | what "zero information" scores; any model must beat it | not built |
-| B1 | **retrieval by speech** — nearest training utterance → its paired ambient clip, verbatim | whether *generation* is needed at all | **queued (406885)**, both Whisper and CLAP spaces |
+| B1 | **retrieval by speech** — nearest training utterance → its paired ambient clip, verbatim | whether *generation* is needed at all | **done (406885)**: sim 0.972 / caption Jaccard 0.055 / 0-16 exact, both spaces |
 | B2 | **retrieval by transcript** — ASR → nearest caption → its clip | whether *audio* input is needed or text suffices | not built |
 | B3 | **caption oracle (rung0)** — condition on ground-truth `audio_cap` | the ceiling | done |
 | B5 | **majority-scene prior** — always generate the most frequent caption | dataset bias | not built |
@@ -95,8 +96,8 @@ matters most — the **0-parameter** bottom. Both fixed. Param counts below are 
 | id | conditioner | trainable params | U-Net | status |
 |---|---|---|---|---|
 | **L−** | frozen **CLAP audio embedding of the speech** straight into the slot — no learned mapping at all (`generate.py --mode rung1`) | **0** | frozen | **already generating (406850)** |
-| L0f | masked mean-pool + one linear | 0.66 M | **frozen** | not built |
-| L0 | masked mean-pool + one linear | 0.66 M | finetuned | not built |
+| L0f | masked mean-pool + one linear | 0.66 M | **frozen** | **done (406945), 100 ep, r1 0.069 = chance** |
+| L0 | masked mean-pool + one linear | 0.66 M | finetuned | **done (406944), 100 ep, r1 0.065 = chance** |
 | L1 | attention-pool + MLP | 7.09 M | finetuned | not built |
 | L3 | k learned queries (Q-Former-ish) | 18.63 M | finetuned | not built |
 | L2 | transformer + attention-pool *(what we ran)* | 32.28 M | finetuned | **done (406301, 91 ep)** |

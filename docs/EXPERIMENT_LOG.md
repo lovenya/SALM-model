@@ -445,8 +445,7 @@ steps. That is the number the T0 one-forward-pass baseline will be compared agai
 `train_regress.py` unpacked `setup_distributed()` as `(rank, local_rank, world_size)` when it
 returns `(rank, world_size, local_rank)` -- as its own docstring states and as `train_ldm.py:322`
 does correctly. Rank 0 therefore saw `local_rank=4`, `world_size=0`, and `cuda:4` raised
-"invalid device ordinal". Fixed, with a comment at the call site. T0 has produced no results yet
-and needs resubmitting.
+"invalid device ordinal". Fixed, with a comment at the call site. (Resubmitted as 407331 — results below.)
 
 ## 2026-08-12 late: rebuilt D1, built the guidance sweep and its scorer
 
@@ -524,4 +523,90 @@ The scorer imported `build_pipeline` from `salm.generate`; the function is `load
 the six generation lanes had already run. Caught by explicitly resolving every import and printing
 its signature — which is now the habit for any new script, per the repo rule about verifying APIs
 against installed source.
+
+## 2026-08-13: T0 and the guidance sweep landed
+
+### T0 confirmed its prediction — and overfits within 4 epochs
+
+Job 407331, 96 epochs, 9.26 M regressor.
+
+| | epoch 0 | final (95) |
+|---|---|---|
+| val MSE | 0.8512 | 0.9139 *(rising)* |
+| train MSE | 0.8952 | 0.6940 |
+| **val_std_ratio** | **0.315** | **0.477** |
+| val_latent_r1 (chance 0.0625) | 0.079 | 0.091 |
+
+**The variance collapse is now measured, not argued.** Predicted latents carry less than half the
+variance of real ones (0.477 against 1.0). For calibration, blending 16 real train latents gives
+0.41 and blending 2 gives 0.73 — so T0's output sits at roughly "the average of ten scenes", which
+is exactly the interpolation-collapse prediction, arrived at independently.
+
+**Latency: 0.14 s/sample against diffusion's 0.69 — 4.9× faster**, with 0 denoising steps. That is
+the floor the diffusion models have to justify, and it is a genuine result for the efficiency claim.
+
+**Caveat that materially affects the reported generation numbers.** T0's val loss bottoms at
+**epoch 4** (0.8363) and rises for the remaining 92 epochs; `select_metric: val_loss` therefore chose
+epoch 4, and the generation ran on that checkpoint (`checkpoint_epoch=4`, std_ratio 0.354). So the
+audio does NOT represent a trained T0 — it represents a barely-trained one, whose variance collapse
+is even worse (0.365 vs 0.477 at the end). Two consequences: 96 epochs bought nothing over 4, and any
+future T0 generation should use `last`, or T0 needs regularisation (dropout/weight decay) to be a
+*fairly tuned* baseline. A reviewer will ask whether the baseline was tuned; right now the honest
+answer is no.
+
+### Guidance sweep: flat, not rising
+
+Job 407327, O2 checkpoint (epoch 75), 24 identical val rows per lane.
+
+| s | 1.0 | 3.0 | 5.0 | 7.5 | 10.0 | 15.0 |
+|---|---|---|---|---|---|---|
+| clap_audio_cos | 0.4905 | 0.5532 | 0.5531 | 0.5508 | 0.5553 | 0.5358 |
+
+One step up from s=1 to s=3 (+0.063), then **flat to declining**: s=3→15 is **−0.017** across a
+five-fold increase in guidance, with a spread of only 0.020 over that whole range.
+
+**A subagent auditing the docs read this as "rising" and concluded it argues against needing Tier 3.
+That reading is wrong on two counts**, recorded here because it is an easy mistake to repeat:
+
+1. It quoted the scoring script's printed legend as if it were a computed verdict. The script prints
+   *every* interpretation line unconditionally; it does not select one.
+2. A curve that steps once and then plateaus is not a rising curve. The only movement is s=1→3, and
+   everything past s=3 is flat or downward.
+
+**More importantly, the number is not interpretable at all yet**, which is my error in building the
+metric without a control. Ambient clips resemble one another, so a generic output scores well against
+ANY target. Verified synthetically: a lane emitting one identical output for every input still scores
+matched = 0.1997, with margin over mismatched targets of exactly 0.0000 and retrieval precisely at
+chance. Until job 415856 reports MARGIN and audio_r1, **no conclusion about the interface, Tier 3, or
+guidance should be drawn from these numbers** — including the flat reading I favour.
+
+Weak corroborating signal, same caveat: `clap_text_cos` ran 0.049 → 0.074 against a 0.0442 chance
+line, i.e. barely above chance at every scale.
+
+### Pre-registered hypothesis: conditioning collapse in the U-Net
+
+Stated before the rescore lands, so it is a prediction rather than a story fitted afterwards.
+
+AudioLDM's pretrained U-Net demonstrably responds to CLAP vectors — that is what makes rung0 work.
+But we finetuned ours for 100 epochs while the conditioner emitted essentially uninformative vectors
+(L2 sat at chance). Under a useless condition plus `cfg_dropout=0.1`, the loss-minimising strategy is
+to ignore `class_labels` entirely. O2 later fixed the conditioner, but the alignment loss touches
+only the conditioner — the U-Net had already collapsed, and the diffusion gradient is far too weak to
+reverse it.
+
+**Prediction:** in the rescore, `pristineunet_last` (O2's conditioner + never-finetuned U-Net) should
+show a HIGHER margin than `trained_last`. Both lanes already exist, so this costs nothing to test.
+If it holds, the fix is to freeze the U-Net (which is also V2A-Mapper's recipe). If it fails, the
+hypothesis is dead and Tier 3 becomes the live option.
+
+### Documentation gaps found by audit, now closed
+
+An audit pass found that T0, the guidance sweep, and both gen-evolution runs had completed while the
+docs still described them as not-yet-run, and that ARCHITECTURE_MENU still listed L0/L0f as "not
+built" and the diagnostics job as "queued". All corrected. Two smaller items: L0f's val_clap_r1 is
+**0.069**, not the 0.070 stated earlier (mean 0.06914, final 0.06939 — neither rounds to 0.070); and
+`runs/s2a_audioldm_whisper_xformer/s2a_rung3_20260806_0834/` (job 397185) is an empty, failed first
+attempt from 2026-08-06, superseded 80 minutes later by the 09:55 run that produced the 12-epoch
+result the log describes. It produced nothing and is kept only so the gap in job numbering is
+explained.
 

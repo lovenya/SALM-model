@@ -164,18 +164,19 @@ we chose against it.
 
 Ordered by information per GPU-hour, which is how every earlier decision here was made.
 
-1. **[IMPL — BUILT, NOT RUN] Guidance sweep on O2.** The decisive experiment; see the entry above.
-   Inference only, ~50 min. Resolves whether the remaining bottleneck is the interface or was just
-   under-guiding.
-2. **[IMPL — BUILT, NOT RUN] Generate from O2** via gen-evolution. Gives snapshot evolution, the
-   pristine-vs-trained U-Net A/B, and the rung0 caption ceiling on identical rows. O2's conditioner
-   now hits 0.613 cosine to the target's CLAP embedding, and rung0 conditions on the true caption's
-   CLAP *text* embedding — so if the U-Net responds properly to CLAP vectors, O2 should land near
-   rung0 rather than near L0. Same job, same rows, same seed.
-3. **[IMPL — FIXED, NOT RUN] T0 resubmit.** Died in 32 s as job 406978 from my tuple-unpack bug
-   (`setup_distributed()` returns `(rank, world_size, local_rank)`; I unpacked
-   `(rank, local_rank, world_size)`, so `cuda:4` raised "invalid device ordinal"). Fixed. No T0
-   results exist yet.
+1. ~~**[DONE 2026-08-13] Guidance sweep on O2** (job 407327).~~ Result: `clap_audio_cos` 0.491 at
+   s=1, 0.553 at s=3, then **flat-to-declining** — s=3→15 is −0.017 across a 5× guidance increase.
+   **But the number is not yet interpretable**: it has no mismatched-target control, and a lane
+   emitting one identical output for every input still scores 0.20. Job 415856 is re-scoring with
+   MARGIN and r1. Do not draw the Tier-3 conclusion until that lands.
+2. ~~**[DONE 2026-08-13] Generate from O2** via gen-evolution (job 407330).~~ 11 lanes, 24 rows
+   each, no silent files, 0.58 s/clip. Includes the `pristineunet_*` lanes that test the
+   conditioning-collapse hypothesis and the rung0 ceiling. **Scoring pending** (job 415856) — RMS
+   alone says nothing semantic.
+3. ~~**[DONE 2026-08-13] T0 ran, 96 epochs** (job 407331).~~ Confirmed its prediction: std_ratio
+   0.315 → 0.477 against real latents at 1.0, and 0.14 s/sample vs diffusion's 0.69 (**4.9× faster**).
+   **But see the T0 overfitting entry in EXPERIMENT_LOG** — its `checkpoint_best` is epoch 4 of 96,
+   so the generated audio came from an essentially untrained network.
 4. **[IMPL] Re-run D1/D2 with the rebuilt metric** on the existing L0/L0f/O2/L2 checkpoints. Cheap
    (~7 min, no training) and necessary: every D1 number currently in the log came from the blind
    version. Also compare `d2_gap` against `d2_gap_zero` to test whether the learned null drifted.
