@@ -69,7 +69,9 @@ fi
 
 # ------------------------------------------------------------- gen-evolution lanes
 if [[ -d "$GEN_DIR" ]]; then
-    mapfile -t GDIRS < <(find "$GEN_DIR" -maxdepth 1 -mindepth 1 -type d \
+    # maxdepth 2, not 1: gen-evolution writes its lanes under a timestamped subdirectory
+    # (generations/evolution_<stamp>/<lane>), so depth 1 finds only the older flat lanes.
+    mapfile -t GDIRS < <(find "$GEN_DIR" -maxdepth 2 -mindepth 1 -type d \
                          -exec test -f '{}/manifest.jsonl' \; -print | sort)
     if [[ ${#GDIRS[@]} -gt 0 ]]; then
         echo
