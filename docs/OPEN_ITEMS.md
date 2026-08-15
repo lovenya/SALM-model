@@ -197,6 +197,49 @@ Ordered by information per GPU-hour, which is how every earlier decision here wa
    and sequence conditioning are *complementary* (mean-pooled FiLM alone reached FAD 1.89), so the
    real limitation may be that we have **only** the pooled path, not that 512 floats is too few.
 
+### Added 2026-08-15
+
+- **[IMPL] Score the RETRIEVAL baseline semantically — it has never been scored.** B1 ran (job
+  406885) and produced 16 clips in each of the Whisper and CLAP spaces, but only ever got
+  *similarity* numbers, never a quality/semantic score. Its manifests are already
+  `score_generations_clap.py`-compatible (`generated_file_rel` + `sample_id` both present), so this
+  is a few minutes of GPU. **Not included in the queued rescore job 415856**, which only points at
+  the O2 sweep and generation dirs.
+  Why it matters: retrieval returns REAL audio, so it sits on the real manifold by construction and
+  is expected to win FAD while losing per-example. MARGIN and `audio_r1` are exactly the metrics
+  that can demonstrate that, and we now have them. Known so far: similarity to nearest training
+  utterance 0.972 (whisper) / 0.971 (clap), caption Jaccard 0.055 / 0.027, **0/16 exact scene
+  matches** — high similarity with near-zero scene agreement.
+  Dirs: `runs/s2a_audioldm_whisper_xformer/long100/diagnostics_20260812_2155/retrieval_{whisper,clap}`
+
+- **[IMPL] Free up scratch space, then try the frozen MLLM encoder (Qwen2.5-Omni).** User's call,
+  2026-08-15. Scratch is tight and the MLLM path needs precomputed features. Do the cleanup first,
+  then the encoder swap. Prior art already gathered: Audio-Omni takes thinker hidden states at
+  **layer −2** (their Table 7: IS 11.26 vs 9.36, FD 2.75 vs 4.21 against the final layer) with a
+  **zero-init linear** adapter, and elaborate adapters (MetaQuery, learned queries) scored *worse*
+  than raw penultimate hidden states. Weights are already local at `models/qwen2.5-omni-3b`.
+
+- **[IMPL] Remaining defects from the 2026-08-15 pre-flight review** (the three severe ones are
+  fixed and committed; these are the rest):
+  - `train_align`/`train_diffusion` are last-batch snapshots logged beside an epoch-mean
+    `train_loss`, so `train_loss ≠ train_diffusion + λ·train_align` and both O2 curves are far
+    noisier than the total. Accumulate means instead.
+  - `val_d1_gap` (single timestep t=125, under bf16 autocast) and `diagnostics.json`'s
+    `mean_d1_gap` (mean over four buckets, fp32) are different quantities with near-identical
+    names — diffing them will show a phantom regression. Compare against `low_t_d1_gap`, or rename.
+  - `diagnose_conditioning.py` loads the U-Net with `strict=False` and discards the result, so a
+    key-set divergence would silently diagnose the PRISTINE U-Net while reporting
+    `unet_weights_loaded: true`. `generate.py` already handles this correctly — mirror it.
+  - `stage2_train_generate.sbatch` and `full_one_node.sbatch` pass `--override output_root=...`,
+    which is not a `TrainConfig` field and is only remapped for YAML, so the trainer exits
+    immediately. Both also look for checkpoints at the wrong path. Stale scripts, currently unused.
+  - `train_regress.py` silently drops unknown `--override` keys (train_ldm raises), and has no
+    resume path at all despite inheriting `resume_from`.
+  - `cfg_dropout_prob: 0` is a DDP landmine: `null_embedding` only gets gradient through
+    `apply_cfg_dropout`, which early-returns at 0, making it an unused parameter that DDP errors on.
+    Base config is 0.1 so the cohort is safe, but a sweep of that knob would hit it.
+  - `train_ldm.py` saves `cuda_rng` but never restores it, so "exact resume" is not bit-exact.
+
 ## Deliberately chosen against (so we stop re-proposing these)
 
 - **AudioGen / autoregressive.** Not on tooling grounds — the user correctly pushed back that we can
