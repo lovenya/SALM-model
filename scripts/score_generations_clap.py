@@ -129,12 +129,36 @@ def main() -> int:
         n = sim.shape[0]
         self_sim = ((sim.sum() - sim.diag().sum()) / max(n * (n - 1), 1)).item() if n > 1 else 0.0
 
+        # ------------------------------------------------------------- THE CONTROL
+        # Added after the first sweep, because without it clap_audio_cos is uninterpretable.
+        # Ambient clips are broadly similar to each other, so a generic output scores well against
+        # ANY target. The question is never "is audio_cos high" but "is it higher for the RIGHT
+        # target than for the wrong ones".
+        #
+        #   cross      = mean cosine of generated_i against target_j, i != j
+        #   margin     = matched - mismatched. ~0 means the number carries no per-example
+        #                information at all, however impressive it looks on its own.
+        #   audio_r1   = fraction where the TRUE target is the nearest of all targets in the lane.
+        #                Chance is 1/n. This is the sharpest per-example statement available.
+        gt = g @ t.t()                                       # (n, n)
+        if n > 1:
+            off = (gt.sum() - gt.diag().sum()) / (n * (n - 1))
+            cross = off.item()
+            truth = torch.arange(n)
+            audio_r1 = (gt.argmax(1) == truth).float().mean().item()
+        else:
+            cross, audio_r1 = float("nan"), float("nan")
+
         results[gd.name] = {
             "dir": str(gd),
             "n": len(gen_paths),
             "missing": missing,
             "clap_audio_cos": a_cos.mean().item(),
             "clap_audio_cos_std": a_cos.std().item() if n > 1 else 0.0,
+            "clap_audio_cos_mismatched": cross,
+            "margin": a_cos.mean().item() - cross,
+            "audio_r1": audio_r1,
+            "audio_r1_chance": 1.0 / n if n else float("nan"),
             "clap_text_cos": t_cos.mean().item(),
             "self_sim": self_sim,
         }
@@ -151,20 +175,28 @@ def main() -> int:
         log(f"  scored {gd.name}: n={len(gen_paths)}")
 
     log(f"\nchance for a 512-d cosine: +/-{CHANCE:.4f}\n")
-    hdr = f"{'lane':34s} {'s':>5} {'n':>4} {'audio_cos':>10} {'text_cos':>9} {'self_sim':>9}"
+    hdr = (f"{'lane':30s} {'s':>5} {'n':>4} {'matched':>8} {'mismat':>8} {'MARGIN':>8} "
+           f"{'r1':>6} {'chance':>7} {'text':>7} {'self':>7}")
     log(hdr)
     log("-" * len(hdr))
     for name, r in sorted(results.items(), key=lambda kv: kv[1].get("guidance_scale", 0)):
-        log(f"{name:34s} {r.get('guidance_scale', float('nan')):>5} {r['n']:>4} "
-            f"{r['clap_audio_cos']:>10.4f} {r['clap_text_cos']:>9.4f} {r['self_sim']:>9.4f}")
+        log(f"{name:30s} {r.get('guidance_scale', float('nan')):>5} {r['n']:>4} "
+            f"{r['clap_audio_cos']:>8.4f} {r['clap_audio_cos_mismatched']:>8.4f} "
+            f"{r['margin']:>8.4f} {r['audio_r1']:>6.3f} {r['audio_r1_chance']:>7.3f} "
+            f"{r['clap_text_cos']:>7.4f} {r['self_sim']:>7.4f}")
 
     log("")
-    log("READING THIS:")
-    log("  audio_cos rising with s = guidance is making the output track the intended scene.")
-    log("  audio_cos flat across s  = the U-Net is not responding to the condition; the")
-    log("     conditioning INTERFACE is the bottleneck, not the conditioner.")
-    log("  high audio_cos WITH high self_sim = one generic output close to everything, which")
-    log("     is a failure however good audio_cos looks. Want self_sim well below audio_cos.")
+    log("READING THIS -- read MARGIN and r1 FIRST, not `matched`:")
+    log("  `matched` alone is nearly meaningless. Ambient clips resemble each other, so a generic")
+    log("  output scores well against ANY target. The question is whether it scores higher for the")
+    log("  RIGHT one.")
+    log("    MARGIN ~ 0 and r1 ~ chance -> the output carries NO per-example information. The")
+    log("       model is emitting generic ambience regardless of what was said.")
+    log("    MARGIN > 0 and r1 > chance -> generation genuinely tracks the individual utterance.")
+    log("  Then, across a guidance sweep:")
+    log("    MARGIN rising with s -> guidance is making the output track the intended scene.")
+    log("    MARGIN flat across s -> the U-Net is not responding to the condition, so the")
+    log("       conditioning INTERFACE is the bottleneck, not the conditioner.")
 
     if args.out:
         Path(args.out).write_text(json.dumps(results, indent=2))
