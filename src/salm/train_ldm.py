@@ -862,6 +862,25 @@ def main() -> int:
     history: list[dict] = []
     best_val = float("inf")
     best_sel = -float("inf") if cfg.select_metric in _HIGHER_IS_BETTER else float("inf")
+    # Separate running best for epochs where select_metric was not computed. See the selection site.
+    best_fallback = float("inf")
+
+    # Fail fast rather than 3 hours in. A select_metric that is only produced on diag/bucket epochs
+    # makes selection alternate between two incomparable scales; one that needs CLAP targets we do
+    # not have means checkpoint_best is never written at all.
+    _DIAG_ONLY = {"val_d1_gap", "val_d2_gap", "val_d2_gap_zero"}
+    if cfg.select_metric in _DIAG_ONLY or cfg.select_metric.startswith("val_loss_t"):
+        raise SystemExit(
+            f"select_metric='{cfg.select_metric}' is only computed on diagnostic/bucket epochs, so "
+            f"selection would alternate between two different scales. Use val_clap_r1 or val_loss."
+        )
+    if cfg.select_metric.startswith("val_clap") and val_clap_dir is None:
+        raise SystemExit(
+            f"select_metric='{cfg.select_metric}' needs CLAP targets for the '{cfg.val_split}' "
+            f"split, which are missing, so checkpoint_best would never be written. Precompute them "
+            f"(scripts/precompute_clap_targets.py --split {cfg.val_split}) or set "
+            f"select_metric: val_loss."
+        )
 
     if cfg.resume_from:
         ckpt_path = Path(cfg.resume_from)
@@ -1076,17 +1095,31 @@ def main() -> int:
             # the expected minimum of 91 draws from that distribution (0.1805). It was selecting
             # noise, so `checkpoint_best` was effectively a random epoch. Prefer a metric with a
             # real chance baseline; `select_metric` names it and higher-is-better is inferred.
+            # The fallback keeps its OWN running best. Sharing one `best_sel` across two metrics
+            # on different scales is silently wrong in both directions:
+            #   - select on a gap-valued metric (~0.30) and the fallback compares val_loss (0.198)
+            #     against it, "improves" trivially, overwrites checkpoint_best AND resets best_sel
+            #     to 0.198 -- after which every later diag epoch trivially "improves" again;
+            #   - select on val_clap_r1 with no CLAP targets and best_sel stays -inf forever, so
+            #     `val_loss < -inf` is never true and NO checkpoint_best is ever written for the
+            #     whole run, with generation silently falling back to checkpoint_last.
             sel_key = cfg.select_metric
             sel = metrics.get(sel_key)
-            if sel is None:
+            use_fallback = sel is None
+            if use_fallback:
                 if sel_key != "val_loss":
-                    log(f"      WARNING: select_metric='{sel_key}' not in metrics this epoch; "
-                        f"falling back to val_loss for selection")
+                    log(f"      note: '{sel_key}' not computed this epoch; "
+                        f"selecting on val_loss for this epoch only")
                 sel_key, sel = "val_loss", val_loss
-            higher_better = sel_key in _HIGHER_IS_BETTER
-            improved = (sel > best_sel) if higher_better else (sel < best_sel)
+                improved = sel < best_fallback
+                if improved:
+                    best_fallback = sel
+            else:
+                higher_better = sel_key in _HIGHER_IS_BETTER
+                improved = (sel > best_sel) if higher_better else (sel < best_sel)
+                if improved:
+                    best_sel = sel
             if improved:
-                best_sel = sel
                 best_val = min(best_val, val_loss)
                 save_checkpoint("best", epoch, global_step, val_loss)
                 log(f"      new best by {sel_key}={sel:.5f} -> checkpoint_best")

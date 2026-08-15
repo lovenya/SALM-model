@@ -15,8 +15,12 @@ clap_audio_cos can still look respectable while carrying no per-example informat
 clap_audio_cos WITH high self_sim means "one generic output that is vaguely close to everything",
 which is a failure. What we want is high clap_audio_cos with self_sim well below it.
 
-Chance reference for a 512-d unit-vector cosine is +/-1/sqrt(512) = +/-0.0442, and the script
-prints it alongside every number.
+BASELINE, and this matters: 1/sqrt(512) = 0.0442 is the chance cosine for RANDOM UNIT VECTORS, and
+it is the wrong reference for this data. Real CLAP target embeddings are strongly clustered -- their
+measured mean pairwise cosine is 0.2927 on val and 0.2910 on train (from
+features_clap/s2a/*/meta.json, which precompute_clap_targets.py computes for exactly this purpose).
+So "predicts a random REAL scene" scores ~0.29, not ~0.04, and that is the honest no-information
+line. The script reads it from meta.json and prints both.
 
 Usage:
     python scripts/score_generations_clap.py --dirs <gen_dir> [<gen_dir> ...] \
@@ -44,8 +48,24 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from configs import paths as project_paths  # noqa: E402
 
-CHANCE = 1.0 / math.sqrt(512)
+# Analytic chance for random unit vectors. Kept only as a reference point -- it is NOT the right
+# baseline for CLAP embeddings, which are strongly clustered. See the module docstring.
+CHANCE_RANDOM = 1.0 / math.sqrt(512)
 AUDIOLDM_CLIP_SECONDS = 10.24
+
+
+def empirical_baseline(direction: str, split: str) -> float | None:
+    """
+    Mean pairwise cosine of the real CLAP targets = what "predicts a random REAL scene" scores.
+    Computed at precompute time and stored in meta.json, so this is free.
+    """
+    p = project_paths.FEATURES_CLAP_ROOT / direction / split / "meta.json"
+    if not p.exists():
+        return None
+    try:
+        return float(json.loads(p.read_text())["pairwise_cosine_mean"])
+    except Exception:
+        return None
 
 
 def log(m: str) -> None:
@@ -144,8 +164,13 @@ def main() -> int:
         if n > 1:
             off = (gt.sum() - gt.diag().sum()) / (n * (n - 1))
             cross = off.item()
-            truth = torch.arange(n)
-            audio_r1 = (gt.argmax(1) == truth).float().mean().item()
+            # `idx`, NOT `truth`: `truth` is the sample_id -> (audio_file, caption) dict built
+            # above and read on every subsequent lane. Binding a LongTensor to that name made
+            # lane 2's `sid not in truth` raise
+            #   RuntimeError: Tensor.__contains__ only supports Tensor or scalar
+            # because sample_id is a string -- so the scorer died after all generation was done.
+            idx = torch.arange(n)
+            audio_r1 = (gt.argmax(1) == idx).float().mean().item()
         else:
             cross, audio_r1 = float("nan"), float("nan")
 
@@ -174,7 +199,13 @@ def main() -> int:
                 pass
         log(f"  scored {gd.name}: n={len(gen_paths)}")
 
-    log(f"\nchance for a 512-d cosine: +/-{CHANCE:.4f}\n")
+    base = empirical_baseline(args.direction, args.split)
+    log("")
+    log(f"baselines: random unit vectors +/-{CHANCE_RANDOM:.4f}  |  "
+        f"random REAL target {base:.4f}" if base is not None else
+        f"baselines: random unit vectors +/-{CHANCE_RANDOM:.4f}  (no meta.json for the real one)")
+    log("  Use the REAL-target line. CLAP embeddings are clustered, so 0.0442 flatters everything.")
+    log("")
     hdr = (f"{'lane':30s} {'s':>5} {'n':>4} {'matched':>8} {'mismat':>8} {'MARGIN':>8} "
            f"{'r1':>6} {'chance':>7} {'text':>7} {'self':>7}")
     log(hdr)
