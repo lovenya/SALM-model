@@ -776,3 +776,76 @@ cosine down-with-quality) and the monotone consistency of it; it does not suppor
 coefficients. Confirming it needs snapshot-scoring on a second run — L0+O2 and the λ=0.2 run both
 have snapshots on disk and have never been generated from, so this is testable for one short job.
 
+## 2026-08-16c: three corrections to my own claims, all verified
+
+An independent design review checked the project's numbers against disk. Four of its load-bearing
+claims I re-verified myself; all four reproduced exactly. Three of them correct things I wrote.
+
+### CORRECTION 1: the stated mechanism for why O2 works is contradicted by our own data
+
+I wrote: *"O2 works because the alignment loss puts the conditioner in the CLAP audio space — the
+space the U-Net actually responds to."* That cannot be right. `pristineunet_last` feeds our O2
+conditioner's output to a U-Net **pretrained on real CLAP audio embeddings**, and it scores MARGIN
+**−0.0036**. If the conditioner's output were genuinely in the CLAP-audio distribution, the pristine
+U-Net would respond to it. It does not.
+
+The evidence-consistent mechanism is close to the opposite: **the conditioner's output is
+systematically offset from the CLAP-audio distribution, and the finetuned U-Net has co-adapted to
+that offset.** The alignment loss supplies dense per-example supervision — that part stands, and it
+is why O2 beat plain diffusion 7×. But "we live in CLAP space" does not survive its own control, and
+must not go in the paper until `cond_offset` (‖mean c‖ vs the targets' 0.5385, and cos(c̄, t̄)) and a
+de-biased cosine have been measured. That is one forward pass over val.
+
+### CORRECTION 2: "val CLAP cosine 0.613 is 14× chance" was wrong twice over
+
+The first correction replaced the random-unit-vector band (±0.0442) with the random-real-target floor
+(0.2925), giving ~2.1×. That was still the wrong floor for a *trained, aligned* conditioner. Verified
+constants:
+
+| reference | value | meaning |
+|---|---|---|
+| random real target | **0.2925** | emit a random real ambient clip |
+| **constant centroid** | **0.5385** | = ‖centroid of targets‖, the trivial solution alignment finds immediately |
+| **same-caption ceiling** | **0.7476** | two DIFFERENT real recordings of the same scene (514 captions, 3,357 pairs) |
+
+Against those, O2's 0.6133 is `(0.6133−0.5385)/(0.7476−0.5385)` = **0.36 of the way from the trivial
+centroid to a different real recording of the same scene**. Corroboration that 0.5385 is the right
+floor: L0+O2's val cosine at **epoch 0** is 0.5417 — the conditioner finds the centroid before it has
+learned anything.
+
+The generation-side headline should be normalised the same way: **NSF = (matched − 0.2925)/(0.7476 −
+0.2925)**. Ours is ~0.52; rung0 is **−0.27**, i.e. its output is *less* like real ambient audio than
+two random real clips are like each other.
+
+### CORRECTION 3: "optimal guidance is 7.5" is not supported
+
+At n=512 the s=3.0 vs s=7.5 difference is MARGIN 0.2824 vs 0.2855 and r1 0.0645 vs 0.0703. The r1
+gap is 0.006 against a binomial SE of ~0.011 — **0.5σ**. The supported claim is only that **s=1 is
+clearly worse and s ∈ [3, 10] is flat**. The apparent peak in the 24-row sweep was noise: per-sample
+cosine σ ≈ 0.19 gives SEM ≈ 0.039 at n=24, so the entire sweep spanned well under one SEM. Retract
+"all future comparisons should regenerate at 7.5".
+
+### The new signal: val_d2_gap disagrees with val_clap_r1 ACROSS runs
+
+| run | r1 final | val_d2_gap first → final |
+|---|---|---|
+| L0 (no O2) | 0.064 | 0.0178 → 0.0103 **falls** |
+| L0f (no O2) | 0.069 | 0.0173 → 0.0126 **falls** |
+| **L0+O2** | **0.464** | 0.0181 → **0.0126 falls** |
+| L2+O2 λ=1.0 | 0.563 | 0.0193 → **0.0234 rises** |
+| L2+O2 λ=0.2 | 0.561 | 0.0193 → **0.0237 rises** |
+
+L0+O2 reaches 82% of L2+O2's r1 while its D2 *falls* to 54% of L2+O2's. So the conditioner improved
+while the U-Net's use of it got worse — and r1 is structurally blind to that, because r1 is measured
+on the conditioner output and is the validation form of the training objective itself.
+
+**This makes one cheap experiment decisive.** Generate 512 rows from `long100_L0_o2` on the same rows
+and seed as the final eval:
+- MARGIN ≈ 0.13–0.16 (tracking D2) → **D2 predicts generation quality, r1 does not**, and our
+  selection metric is measuring the wrong thing.
+- MARGIN ≈ 0.24–0.27 (tracking r1) → r1 is right and D2's cross-run behaviour is a red herring.
+
+Either way it is one generation lane. Also note `val_clap_cos` peaks at **epoch 3 (0.6953)** and
+declines monotonically to 0.6133 — so it is anti-correlated with quality across essentially the whole
+run, not just the late part.
+
