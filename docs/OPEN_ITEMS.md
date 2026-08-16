@@ -192,10 +192,13 @@ Ordered by information per GPU-hour, which is how every earlier decision here wa
 7. **[IMPL] Precompute frozen Whisper features.** 8.9 GB storing valid frames only; removes the
    635 M forward pass from every step of every epoch *and* the CPU-bound decode/resample. Bigger win
    than any batch-size change. See the efficiency section below.
-8. **[BLOCKED on the sweep] Tier 3 — add a sequence/cross-attention conditioning path.** Only
-   justified if the sweep comes back flat. Evidence it might be needed: arXiv 2501.14680 shows pooled
-   and sequence conditioning are *complementary* (mean-pooled FiLM alone reached FAD 1.89), so the
-   real limitation may be that we have **only** the pooled path, not that 512 floats is too few.
+8. ~~**[DROPPED 2026-08-16] Frozen-U-Net runs (O2f, O2f λ=0.2).**~~ The hypothesis that motivated
+   them is refuted: the pristine U-Net scores MARGIN **−0.0036** against the trained U-Net's
+   **+0.2707**, so U-Net finetuning is essential rather than harmful and freezing is the wrong
+   direction. ~7 GPU-h saved. User decision to drop rather than run one as a recorded negative.
+9. **[DEFERRED] Tier 3 — sequence/cross-attention conditioning path.** Was blocked on the sweep
+   coming back flat. It did not: with the mismatched-target control, MARGIN rises to a peak at
+   s=7.5, so the pooled interface is working. Not the bottleneck, so this drops well down the list.
 
 ### Added 2026-08-15
 
