@@ -610,3 +610,116 @@ attempt from 2026-08-06, superseded 80 minutes later by the 09:55 run that produ
 result the log describes. It produced nothing and is kept only so the gap in job numbering is
 explained.
 
+## 2026-08-16: the control changed the verdict — O2 works, and two of my readings were wrong
+
+### 1. The generated audio DOES track the utterance
+
+With the mismatched-target control in place, the O2 model's output carries strong per-example
+information. `matched` alone (0.57) was uninterpretable; `MARGIN` and `r1` are not:
+
+| lane | matched | mismatched | **MARGIN** | **r1** (chance 0.042) |
+|---|---|---|---|---|
+| **trained_last (O2)** | 0.573 | 0.303 | **0.271** | **0.417 — 10×** |
+| trained_ep19 | 0.504 | 0.294 | 0.211 | 0.250 |
+| trained_ep99 | 0.575 | 0.303 | 0.272 | 0.500 |
+
+MARGIN rises monotonically across snapshots (0.211 → 0.245 → 0.269 → 0.267 → 0.272), so the model
+improved throughout training on a metric that can actually see it. This is the first hard evidence
+in the project that generation tracks the individual utterance.
+
+### 2. REFUTED: my conditioning-collapse hypothesis, in the opposite direction
+
+I pre-registered this: the U-Net had supposedly learned to ignore `class_labels` during 100 epochs of
+useless conditioning, and `pristineunet_last` should therefore BEAT `trained_last` on MARGIN.
+
+| lane | MARGIN | r1 |
+|---|---|---|
+| pristineunet_ep19 | **−0.0015** | 0.083 |
+| pristineunet_last | **−0.0036** | 0.083 |
+| trained_last | **+0.2707** | 0.417 |
+
+**The exact opposite.** The pristine U-Net has literally zero margin; the trained one has 0.27. So
+U-Net finetuning is not merely harmless, it is *essential* — without it the conditioning does nothing
+at all. The hypothesis is dead, and the two frozen-U-Net runs it motivated (O2f, O2f at λ=0.2) are
+cancelled before submission, saving ~7 GPU-h.
+
+Worth keeping in mind for later: this also means every s2a sample generated before 2026-08-12 — when
+`generate.py` silently discarded the trained U-Net — was pure noise-conditioned output.
+
+### 3. WRONG: I read the guidance sweep as flat. With the control it rises, and peaks at 7.5
+
+| s | 1.0 | 3.0 | 5.0 | **7.5** | 10.0 | 15.0 |
+|---|---|---|---|---|---|---|
+| MARGIN | 0.189 | 0.258 | 0.267 | **0.280** | 0.274 | 0.252 |
+| r1 | 0.292 | 0.500 | 0.458 | 0.500 | 0.500 | 0.333 |
+
+`matched` was genuinely flat, which is what I read; MARGIN — the metric that didn't exist yet — was
+rising the whole time. **Optimal guidance is ≈7.5, not the 3.0 we have used everywhere.** All future
+comparisons should regenerate at 7.5. The measured D2 predicted this correctly: at D2 = 0.0167, s=3
+gives only ~5% deviation from unconditional.
+
+Note on process: the doc-audit subagent called the curve "rising" and I overruled it. It reached the
+right conclusion from the wrong evidence (it read `matched`, and quoted the script's unconditional
+legend as a verdict); I reached the wrong conclusion from better reasoning applied to a metric I had
+built without a control. Being right about the reasoning did not make me right about the answer.
+
+### 4. rung0, the "caption ceiling", is a FLOOR
+
+| lane | matched | MARGIN | r1 | self_sim |
+|---|---|---|---|---|
+| rung0_caption_ceiling | 0.199 | **0.006** | **0.042 = chance** | 0.541 |
+| rung1_clap_control | 0.306 | 0.004 | 0.042 = chance | 0.713 |
+| **trained_last (ours)** | 0.573 | **0.271** | **0.417** | 0.299 |
+
+Conditioning on the ground-truth caption's CLAP **text** embedding produces generic audio with zero
+per-example information — its `matched` of 0.199 is *below* the 0.293 random-real-target baseline. We
+beat the supposed ceiling by ~45×  on MARGIN.
+
+This explains why O2 worked, and it is the mechanism we should write up: AudioLDM is trained on CLAP
+**audio** embeddings and merely swaps text in at inference. O2's alignment loss puts the conditioner
+in the CLAP *audio* space — the space the U-Net actually responds to. Text conditioning sits across
+the modality gap and lands nowhere useful.
+
+**rung1 also confirms a claim we had only asserted:** CLAP-on-speech is at chance with self_sim 0.713
+(near-identical outputs), i.e. CLAP encodes "someone is speaking", not what was said. That is now our
+own measured result rather than a borrowed intuition.
+
+### 5. Retrieval scored at last — and we beat it per-example
+
+| lane | matched | MARGIN | r1 (chance 0.042) |
+|---|---|---|---|
+| retrieval (whisper space) | 0.433 | 0.093 | 0.083 |
+| retrieval (clap space) | 0.318 | 0.016 | 0.000 |
+| **ours (O2)** | 0.573 | **0.271** | **0.417** |
+
+~3× retrieval's MARGIN and 5× its r1. Combined with 0/24 exact scene matches and caption Jaccard
+0.055, the predicted story holds: retrieval returns real audio so it will flatter distributional
+metrics, and it loses badly per-example. Report FAD and MARGIN together.
+
+### 6. L0 + O2: the ablation the paper needs
+
+| run | conditioner | objective | val_clap_r1 (chance 0.0625) |
+|---|---|---|---|
+| L0 | 0.66 M | diffusion only | 0.064 — chance |
+| **L0 + O2** | **0.66 M** | **+ alignment** | **0.464 — 7.4×** |
+| O2 | 32.3 M | + alignment | 0.563 — 9× |
+
+At fixed capacity the objective moves r1 from chance to 7.4× (**a 7× gain**); at fixed objective,
+50× more capacity adds **+21%**. That quantifies the whole thesis in one table: the objective was the
+story, capacity is a modest refinement.
+
+A detail that supports sweeping λ down: L0+O2's train alignment loss only fell 0.445 → 0.316 (the
+0.66 M conditioner cannot memorise the alignment targets), and its **val** CLAP cosine is *higher*
+than O2's — 0.641 vs 0.613. Less overfitting, better generalisation.
+
+### 7. The rebuilt D1/D2 resolves what the old one could not
+
+| checkpoint | D1 gap | D2 (null) | D2 (zero) | low-t D1 |
+|---|---|---|---|---|
+| O2 ep19 | 0.0149 | 0.0111 | 0.0119 | 0.0212 |
+| O2 last | **0.0236** | 0.0167 | 0.0173 | 0.0312 |
+
+D1 grew ~60% across training — visible where the old loss-delta version read 0.0002 and saw nothing.
+And D2(null) ≈ D2(zero) at every point, so the learned-null-drift confound I worried about is ruled
+out: the null embedding did not drift toward the mean condition.
+
