@@ -723,3 +723,56 @@ D1 grew ~60% across training — visible where the old loss-delta version read 0
 And D2(null) ≈ D2(zero) at every point, so the learned-null-drift confound I worried about is ruled
 out: the null embedding did not drift toward the mean condition.
 
+## 2026-08-16b: do our training metrics predict final AUDIO quality? Measured
+
+The question that makes ablations interpretable: we only ever learn whether a run was good by
+generating and scoring afterwards. Is there a per-epoch number that predicts it?
+
+We can answer this from data already on disk. O2's snapshots at epochs 19/39/59/79/99 were each
+generated and scored, so each has BOTH training metrics and a final-audio MARGIN.
+
+| epoch | val_clap_r1 | val_clap_cos | val_loss | **MARGIN** | audio_r1 |
+|---|---|---|---|---|---|
+| 19 | 0.5291 | 0.6395 | 0.2013 | 0.2106 | 0.250 |
+| 39 | 0.5445 | 0.6268 | 0.2010 | 0.2449 | 0.333 |
+| 59 | 0.5546 | 0.6193 | 0.2003 | 0.2690 | 0.292 |
+| 79 | 0.5625 | 0.6138 | 0.1981 | 0.2669 | 0.458 |
+| 99 | 0.5630 | 0.6133 | 0.1985 | 0.2715 | 0.500 |
+
+Correlation with final-audio MARGIN:
+
+| training metric | Pearson | Spearman |
+|---|---|---|
+| **val_clap_r1** | **+0.968** | +0.900 |
+| **val_clap_cos** | **−0.975** | −0.900 |
+| val_loss | −0.754 | −0.700 |
+
+**Two consequences, one of them surprising.**
+
+1. **val_clap_r1 is validated as the selection metric.** It tracks final audio quality almost
+   perfectly over this trajectory, which is what we switched `select_metric` to. Good.
+
+2. **val_clap_cos is ANTI-correlated with audio quality.** The conditioner's cosine to the target
+   CLAP embedding *falls* (0.6395 → 0.6133) over exactly the epochs where the generated audio
+   *improves* (MARGIN 0.211 → 0.272). Selecting on cosine would have picked epoch 19, the worst
+   snapshot.
+
+   Interpretation, offered as a hypothesis rather than a finding: the alignment loss gets the
+   conditioner into the right region of CLAP space early, after which the conditioner and U-Net
+   co-adapt, and drifting *off* pure CLAP geometry is what improves generation. Maximising cosine is
+   therefore not the goal — reaching a good-enough region is.
+
+   If that is right it has a concrete implication: the alignment term should be **decayed after it
+   has done its job**, which is exactly the "REPA Works Until It Doesn't" (arXiv 2505.16792)
+   prescription we noted but never tested. The `align_warmup_steps` knob currently only ramps λ UP;
+   a decay schedule is the untested experiment, and it is cheap. It also explains why λ=0.2 and
+   λ=1.0 were indistinguishable: both reach the region fast, and what matters afterwards is that the
+   term stops dominating — which neither configuration does.
+
+**Caveat, stated plainly.** n = 5, from a single run, and these are consecutive points on one
+training trajectory, so they are autocorrelated rather than independent draws. The usual
+significance reading does not apply. What the data supports is the DIRECTION (r1 up-with-quality,
+cosine down-with-quality) and the monotone consistency of it; it does not support the precise
+coefficients. Confirming it needs snapshot-scoring on a second run — L0+O2 and the λ=0.2 run both
+have snapshots on disk and have never been generated from, so this is testable for one short job.
+
