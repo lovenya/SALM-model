@@ -93,14 +93,29 @@ def main() -> int:
     pipe = load_pipeline(str(device), torch.float32)
     from salm.generate import clap_text_embeddings
 
-    # Ground truth for the split: sample_id -> (target audio path, caption)
-    feat_dir = project_paths.FEATURES_ROOT / args.direction / args.split
+    # Ground truth for the split: sample_id -> (target audio path, caption).
+    #
+    # Prefer the precomputed features index when it exists, but fall back to the raw manifest.
+    # Reading only the features index coupled scoring to the TRAINING precompute for no reason:
+    # generate.py itself reads load_manifest() directly, so inference on a split works with no
+    # precompute at all, and requiring the index here would have forced a pointless ~30 min latent
+    # job before the test split could be scored. The manifest carries audio_file and audio_cap,
+    # which is everything this needs.
     truth = {}
-    with (feat_dir / "index.jsonl").open() as f:
-        for line in f:
-            r = json.loads(line)
-            truth[r["sample_id"]] = (r["audio_file"], r.get("audio_cap", ""))
-    log(f"ground truth for {len(truth)} {args.split} rows")
+    idx = project_paths.FEATURES_ROOT / args.direction / args.split / "index.jsonl"
+    if idx.exists():
+        with idx.open() as f:
+            for line in f:
+                r = json.loads(line)
+                truth[r["sample_id"]] = (r["audio_file"], r.get("audio_cap", ""))
+        src = f"features index ({idx})"
+    else:
+        from salm.data.manifest import load_manifest
+
+        for r in load_manifest(args.direction, args.split):
+            truth[r.sample_id] = (str(r.audio_path), getattr(r, "audio_cap", "") or "")
+        src = f"manifest (no features index for '{args.split}')"
+    log(f"ground truth for {len(truth)} {args.split} rows, from {src}")
 
     def embed_audio(paths: list[str]) -> torch.Tensor:
         out = []
