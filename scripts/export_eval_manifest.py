@@ -115,15 +115,27 @@ def main() -> int:
                 "stage": args.stage,
                 "model": args.model,
                 "status": "success",
+                # EVERY key in `input` becomes a key of the evaluator's `source` dict.
+                # evaluation/io.py:_v1_source() builds source by copying record["input"] wholesale
+                # (`source.setdefault(key, value)`), and a top-level "source" key we write is
+                # IGNORED for schema_version 1. So the reference clip must be `input.audio_file`,
+                # because FAD/KAD/geval_audio_reference look for `source.audio_file`.
+                #
+                # Getting this wrong made evaluate.py reject all 1,878 rows with
+                # "metric fad: requires source.audio_file". Caught by --dry-run, before any GPU
+                # time was spent -- always dry-run this interface before submitting.
                 "input": {
                     "source_sample_id": r["sample_id"],
                     # The dataset target caption. target_caption_clap_score scores the
                     # generated audio against this.
                     "audio_cap": r.get("audio_cap"),
+                    "audio_caption": r.get("audio_cap"),
                     "prompt": r.get("audio_cap"),
                     "speech_text": r.get("speech_text"),
                     "speech_file": r.get("speech_file"),
-                    # Reference ambient clip: what FAD/KAD compare the distribution against.
+                    # The ground-truth ambient clip, under the name the evaluator requires.
+                    "audio_file": r.get("reference_audio_file"),
+                    # Same path under the more descriptive name, kept for human readers.
                     "reference_audio_file": r.get("reference_audio_file"),
                 },
                 "output": {

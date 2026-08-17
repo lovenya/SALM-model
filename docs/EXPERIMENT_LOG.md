@@ -1113,3 +1113,54 @@ read as though the two new ones had not run. The data was in `ablation_scores.js
 Fixed to iterate over what was actually scored. Worth recording because the failure mode is a
 *silently incomplete* result table, which is exactly the kind of thing that gets believed.
 
+## 2026-08-17c: wiring up FAD / KAD / KL-PaSST — the interface, and two schema traps
+
+The project has had **zero distributional metrics** throughout. Everything so far is our own
+CLAP-based MARGIN / audio_r1, which is not comparable to any published number and is partly
+self-referential (O2 trains against CLAP). These are the metrics a reviewer reads first.
+
+Worked out the SpeechAudioLM evaluator interface by reading it and using `--dry-run`, rather than
+firing a job at it. Recording the mechanics because they are not guessable and cost two failed
+attempts:
+
+1. **`--manifest` IS the row source**, despite its help text calling it a "baseline" manifest.
+   `runner.py:_evaluation_rows` reads it directly. My first reading — that our outputs had to be
+   registered in the results tree and located via `--evaluated-run-id` — was wrong; the run id only
+   names the output directory.
+
+2. **Every key of our `input` block becomes a key of the evaluator's `source` dict.**
+   `io.py:_v1_source()` copies `record["input"]` wholesale via `setdefault` for `schema_version: 1`,
+   and a top-level `"source"` key that we write is **ignored**. FAD/KAD require `source.audio_file`,
+   so the reference clip must be exported as **`input.audio_file`**.
+   Our exporter wrote it as `input.reference_audio_file`, so the evaluator rejected **all 1,878
+   rows** with `metric fad: requires source.audio_file`. My first fix added a top-level `source`
+   block, which changed nothing because that path is dead for v1. Fixed by putting `audio_file`
+   inside `input`.
+
+3. **One metric per invocation.** `runner.py`: *"Each eval run must contain exactly one metric; split
+   multi-metric commands into per-metric runs."* A comma-separated list is rejected, so the job runs
+   one invocation per (lane, metric) — 4 lanes × 5 metrics = 20.
+
+4. Each metric shells out to its **own backend venv**, resolved from `configs/eval_metrics.json`
+   (`{environment:audioldm_eval}`, `{environment:kadtk}`, `{environment:stable_audio_metrics}`).
+   Those already exist; nothing needed installing. **FAD uses PANNs**, which is the right choice —
+   DCASE 2024 found PANNs FAD correlates with human ratings at ρ = −0.94, above CLAP and VGGish.
+
+Dry-run now passes: 1,878 rows selected, `status: final_scientific`.
+
+**Excluded deliberately.** `prompt_adherence_clap_score` scores audio against a persisted *text*
+generation prompt, and direct S2A has no text prompt, so the number would be meaningless. The
+`geval_*` metrics are LLM-judged and need a served model.
+
+**Predictions, written down before the numbers exist**, so a surprising result gets questioned rather
+than believed:
+- **retrieval should WIN on FAD while losing on MARGIN** — it returns real recordings, so it is on the
+  real manifold by construction. Reporting both together is the point.
+- **rung0 should be catastrophically bad on FAD**: its `matched` CLAP cosine of 0.159 is *below* the
+  0.29 random-real-clip floor, so the audio is not merely wrong but off-distribution.
+- **b0 should show poor diversity**: `self_sim` 0.73 against 0.29 for real clips.
+
+**Note on the other repo:** it is read-only for us. The only write ever made there is the one-line
+`salm_e2e` registration in `configs/model_capabilities.json`, which the user approved, and which is
+still left uncommitted for them to stage.
+
