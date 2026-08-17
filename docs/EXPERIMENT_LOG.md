@@ -987,3 +987,62 @@ the retention ordering 0% / 1% / 38% / 50% tracks it monotonically, which is the
 scene from language" from "correlates with acoustic surface properties", and no metric we had before
 could tell those apart.
 
+### Why time-reversal licenses the conclusion (the reasoning, not just the number)
+
+Recording this explicitly because the inference is the whole value of the experiment.
+
+**The problem.** MARGIN 0.284 is consistent with at least five different explanations, and every
+metric we had — MARGIN, `audio_r1`, CLAP cosine — would look **identical** under all of them:
+
+1. the model reads the linguistic content ← our claim
+2. it reads speaker identity / voice timbre
+3. it reads recording channel, or background noise leaking into the speech track
+4. it reads prosodic energy (loudness, rhythm)
+5. it reads the long-term spectrum (spectral tilt, brightness)
+
+No improvement in scoring could separate these, because they all predict the same scores. Only an
+intervention on the *input* can.
+
+**Why reversal is the right intervention.** It leaves 2–5 exactly intact and removes only 1:
+
+| property | under reversal | measured |
+|---|---|---|
+| magnitude spectrum | preserved | log-spectrum correlation **1.000** |
+| RMS / energy | preserved | 0.1460 → 0.1460, identical |
+| speaker timbre, channel | preserved | same samples, reordered |
+| duration → encoder mask | preserved | identical length |
+| **linguistic content** | **destroyed** | waveform correlation **−0.020** |
+
+So reversal is a *matched confound*: same samples, same spectrum, same energy, same voice, no
+language. Performance went 0.2835 → −0.0033 and `audio_r1` 0.0625 → 0.0020 (chance 0.002).
+
+**Therefore** explanations 2–5 are ruled out — each was left untouched and would have kept the model
+working. What was removed is language, and the performance went with it. The `noise` lane (1%) is the
+companion control confirming the pipeline responds to input at all, so the collapse is not something
+breaking silently.
+
+**What this does NOT establish.** Reversal destroys phonemes, words and syntax simultaneously, so it
+shows dependence on *linguistic content* without isolating which level. That is why two lanes were
+added afterwards, completing a 2×2 on {local content} × {global order}:
+
+| lane | local content | global order | retained |
+|---|---|---|---|
+| none | intact | intact | 100% |
+| shuffle (250 ms) | intact | destroyed | 38% |
+| **shuffle_500ms** | more intact | destroyed | pending |
+| **local_reverse** | destroyed | intact | pending |
+| reverse | destroyed | destroyed | −2% |
+
+`local_reverse` reverses within each 250 ms window while keeping window order — the exact complement
+of `shuffle`. Verified: spectrum correlation 0.760, waveform correlation 0.023, length and RMS
+identical.
+
+**A bug caught before it cost GPU time, worth recording.** The first version of the coarse-shuffle
+lane used 1 s segments. On a 3.75 s clip that gives 3 chunks, and seed 1234 drew the *identity*
+permutation — the lane returned its input unchanged (waveform correlation 1.000). Had it run, it would
+have reported full performance and been read as "word order does not matter" when nothing had been
+scrambled. This is the worst failure mode an ablation can have: a no-op that looks like a finding.
+Fixed by (a) replacing 1 s with 500 ms so there are ~9 chunks at our 4.63 s mean duration, and (b)
+forcing a random n-cycle so no shuffle can ever be the identity — verified 0 fixed points and 0
+duplicate indices over 4,400 trials, and non-trivial scrambling on 4 real clips.
+

@@ -107,6 +107,25 @@ class ClapAudioEncoder:
         return F.normalize(feats, dim=-1)
 
 
+def _derangement(n: int, seed: int) -> "np.ndarray":
+    """
+    A permutation of 0..n-1 with NO fixed points, for n >= 2.
+
+    A plain randperm can return the identity, which makes a "shuffle" lane silently a no-op. That is
+    the worst possible failure for an ablation: the lane would report full performance and be read as
+    "order does not matter" when in fact nothing was scrambled. Caught exactly this with 1 s segments
+    on a 3.75 s clip (3 chunks, seed 1234 drew the identity). A random n-cycle is deranged by
+    construction and is still a valid permutation.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(n)
+    perm = np.empty(n, dtype=np.int64)
+    perm[order] = np.roll(order, -1)
+    return perm
+
+
 def degrade_speech(wav: np.ndarray, mode: str, seed: int) -> np.ndarray:
     """
     Destroy a chosen property of the speech while preserving the others.
@@ -147,8 +166,35 @@ def degrade_speech(wav: np.ndarray, mode: str, seed: int) -> np.ndarray:
         if n_full < 2 * seg:
             return wav                   # too short to shuffle meaningfully; leave it alone
         segs = wav[:n_full].reshape(-1, seg)
-        order = np.random.default_rng(seed).permutation(len(segs))
-        return np.concatenate([segs[order].reshape(-1), wav[n_full:]]).astype(np.float32)
+        return np.concatenate([segs[_derangement(len(segs), seed)].reshape(-1),
+                               wav[n_full:]]).astype(np.float32)
+    if mode == "local_reverse":
+        # Reverse WITHIN each 250 ms window but keep the windows in order. Destroys local phonetic
+        # identity while preserving global temporal order, the envelope, and the spectrum. This is
+        # the complement of `shuffle` (which preserves local content and destroys order), and the
+        # pair forms a 2x2 that separates the two factors `reverse` destroys together:
+        #     none           local content OK,   order OK    -> 100%
+        #     shuffle        local content OK,   order GONE  ->  38%
+        #     local_reverse  local content GONE, order OK    ->    ?
+        #     reverse        local content GONE, order GONE  ->  -2%
+        seg = 4000
+        n_full = (len(wav) // seg) * seg
+        if n_full < seg:
+            return wav[::-1].copy()
+        out = wav[:n_full].reshape(-1, seg)[:, ::-1].reshape(-1)
+        return np.concatenate([out, wav[n_full:][::-1]]).astype(np.float32)
+    if mode == "shuffle_500ms":
+        # Coarser than 250 ms so a short word is more likely to survive intact, but still fine enough
+        # to give ~9 chunks at our 4.63 s mean duration. A 1 s variant was tried and DISCARDED: at
+        # these durations it yields only 3-4 chunks, too few to scramble order meaningfully, and it
+        # silently returned the input unchanged on the first clip tested.
+        seg = 8000
+        n_full = (len(wav) // seg) * seg
+        if n_full < 2 * seg:
+            return wav
+        segs = wav[:n_full].reshape(-1, seg)
+        return np.concatenate([segs[_derangement(len(segs), seed)].reshape(-1),
+                               wav[n_full:]]).astype(np.float32)
     if mode == "lowpass":
         from scipy.signal import butter, filtfilt
         b, a = butter(4, 400.0 / (AUDIOLDM_SR / 2), btype="low")
@@ -239,7 +285,8 @@ def main() -> int:
     # Language-degradation ablation. Applied to the speech waveform before the frozen encoder, so
     # the model and every other setting are untouched -- only the information in the input changes.
     ap.add_argument("--degrade", default="none",
-                    choices=["none", "reverse", "shuffle", "lowpass", "noise"],
+                    choices=["none", "reverse", "shuffle", "shuffle_500ms", "local_reverse",
+                             "lowpass", "noise"],
                     help="destroy one property of the input speech; see degrade_speech()")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--batch-size", type=int, default=4)
