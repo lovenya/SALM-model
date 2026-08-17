@@ -849,3 +849,51 @@ Either way it is one generation lane. Also note `val_clap_cos` peaks at **epoch 
 declines monotonically to 0.6133 — so it is anti-correlated with quality across essentially the whole
 run, not just the late part.
 
+## 2026-08-16d: the prediction test resolved — you need BOTH training metrics
+
+Pre-registered branches were "MARGIN ≈ 0.13–0.16 ⇒ D2 predicts" or "≈ 0.24–0.27 ⇒ r1 predicts".
+Result for L0+O2: **MARGIN 0.2300** — between them. The reason is that the two generation metrics
+track *different* training metrics:
+
+| | L2+O2 (32.3 M) | L0+O2 (0.66 M) | ratio |
+|---|---|---|---|
+| conditioner `val_clap_r1` | 0.563 | 0.464 | **0.824** |
+| `val_d2_gap` | 0.0234 | 0.0126 | **0.538** |
+| generation **MARGIN** | 0.2855 | 0.2300 | **0.806** |
+| generation **audio_r1** | 0.0703 | 0.0352 | **0.501** |
+
+`MARGIN` ratio 0.806 matches `r1` ratio 0.824. `audio_r1` ratio 0.501 matches `d2` ratio 0.538.
+
+**Mechanistically this makes sense and it is the useful answer to "how do we know a run is good":**
+
+- `val_clap_r1` (conditioner quality) → predicts **mean fidelity**: how close the average output is
+  to its target.
+- `val_d2_gap` (how strongly the U-Net responds to conditioning) → predicts **discriminability**:
+  whether the output is identifiably the *right* scene rather than merely a good one.
+
+Selecting on `r1` alone optimises average fidelity while ignoring whether the U-Net acts strongly
+enough on the condition for the output to be individually correct. **Log and report both; select on
+`r1` but treat a falling `d2` as a warning that per-example correctness is degrading.**
+
+### Correction: capacity matters MORE than the conditioner metric implied
+
+Earlier I wrote that the objective was worth 7× and capacity only +21%. That +21% came from
+conditioner `r1` (0.464 vs 0.563). At the audio level, 50× more capacity is worth:
+
+- MARGIN 0.230 → 0.286 (+24%, consistent with the r1 view)
+- **audio_r1 0.0352 → 0.0703 (2.0×)**
+
+So the ablation's conclusion depends on the metric: the objective still dominates (chance → 0.23
+MARGIN is the big jump), but capacity buys a **doubling** of per-example correctness, not a marginal
+21%. The paper table must state which metric each claim rests on.
+
+### λ confirmed irrelevant, now at the audio level
+
+λ=1.0 vs λ=0.2: MARGIN 0.2855 vs 0.2830, audio_r1 **0.0703 vs 0.0703** (identical), NSF 0.57 both.
+A 5× sweep produces no difference in conditioner space, U-Net response, or generated audio. Closed.
+
+**Caveat:** n=3 runs. The ratio correspondence (0.824↔0.806, 0.538↔0.501) is striking but three
+points cannot separate "these metrics predict different things" from coincidence. It is a hypothesis
+with a mechanism, and the cheap way to test it is any run where r1 and d2 move in opposite
+directions.
+
