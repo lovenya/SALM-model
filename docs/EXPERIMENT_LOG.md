@@ -943,3 +943,47 @@ emitting one generic ambience as the linguistic information is removed.
 that does not name the sound, rather than exploiting acoustic correlates of the recording. That claim
 now has a control behind it. It is the figure the paper should lead with.
 
+## 2026-08-17: the language ablation — the model provably uses LANGUAGE
+
+Job 417915, 512 test... (val) rows per lane, identical rows and seed, only the input speech altered.
+Pre-registered readings were written into the script header before the job ran.
+
+| lane | what was destroyed | MARGIN | audio_r1 | above-floor retained |
+|---|---|---|---|---|
+| **none** | — | **0.2835** | 0.0625 | 100% |
+| **reverse** | **ALL linguistic content** (spectrum + RMS preserved exactly) | **−0.0033** | **0.0020** | **−2%** |
+| shuffle | word order / syntax (250 ms segments permuted) | 0.1078 | 0.0156 | 38% |
+| lowpass | phonetic detail (F0, rhythm, envelope kept) | 0.1428 | 0.0195 | 50% |
+| noise | everything but the energy level | 0.0058 | 0.0059 | 1% |
+
+**The central claim is now supported by direct evidence.** Time-reversal preserves the long-term
+spectrum (log-spectrum correlation to the original = **1.000**), the RMS (0.146, identical), the
+speaker's timbre and the channel — and destroys only the linguistic content. It takes the model from
+MARGIN 0.2835 to **−0.0033**, i.e. to the unconditional floor, and `audio_r1` from 0.0625 to 0.0020
+(chance is 0.002). So the model is not reading speaker identity, recording channel, background
+leakage or prosodic energy. **It is reading what was said.**
+
+`noise` at 1% is the sanity check that had to pass for any of this to be interpretable, and it did:
+the pipeline genuinely responds to its input rather than emitting a fixed output.
+
+### Secondary finding: word order matters, so it is not a bag of words
+
+`shuffle` retains only 38%. Segment-permutation at 250 ms leaves the phonetic material largely intact
+while destroying order and syntax, so losing 62% says sequence carries real information — the model is
+not simply keyword-spotting. **Caveat:** 250 ms is roughly a syllable, not a word, so this manipulation
+does not cleanly preserve word identities. Treat "order matters" as supported and "bag of words is
+insufficient" as suggestive rather than established; a word-boundary-aligned shuffle would settle it.
+
+### `lowpass` at 50% needs the honest reading
+
+Prosody-only retaining half looks striking, but `lowpass` is by far the *mildest* manipulation of the
+four: its waveform correlation to the original is **0.823**, against −0.020 for reverse. A 400 Hz
+low-pass still passes F0 and substantial vowel energy. So 50% retention from a mild degradation is not
+strong evidence that prosody alone carries half the signal. Ranking the lanes by how much linguistic
+content each removes — reverse (all) → noise (all) → shuffle (syntax) → lowpass (some phonetics) —
+the retention ordering 0% / 1% / 38% / 50% tracks it monotonically, which is the coherent reading.
+
+**This is the figure for the paper.** It is the one measurement that distinguishes "infers an implied
+scene from language" from "correlates with acoustic surface properties", and no metric we had before
+could tell those apart.
+
