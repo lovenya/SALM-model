@@ -1046,3 +1046,70 @@ Fixed by (a) replacing 1 s with 500 ms so there are ~9 chunks at our 4.63 s mean
 forcing a random n-cycle so no shuffle can ever be the identity — verified 0 fixed points and 0
 duplicate indices over 4,400 trials, and non-trivial scrambling on 4 real clips.
 
+## 2026-08-17b: TEST-split results, and the 2×2 corrects my "order matters" claim
+
+### First non-validation numbers: the result holds on the unseen test split
+
+Job 418000, all **1,878 test rows**, our first numbers that are not validation.
+
+| lane | matched | mismatched | MARGIN | audio_r1 | chance |
+|---|---|---|---|---|---|
+| **ours s=7.5** | 0.5551 | 0.2723 | **0.2827** | **0.0240** | 0.00053 |
+| ours s=3.0 | 0.5680 | 0.2864 | 0.2816 | 0.0192 | 0.00053 |
+| b0 unconditional | 0.3083 | 0.3076 | 0.0007 | 0.0021 | 0.00053 |
+| rung0 caption | 0.1590 | 0.1582 | 0.0008 | 0.0000 | 0.00053 |
+| rung1 CLAP-on-speech | 0.2885 | 0.2873 | 0.0012 | 0.0000 | 0.00053 |
+
+**It generalises almost exactly**: MARGIN 0.2827 on test against 0.2855 on val — a 1% difference on
+1,878 unseen rows. `audio_r1` 0.0240 against a 1/1878 = 0.00053 chance line is **45× chance**: the
+model picks the exact correct target out of 1,878 candidates 2.4% of the time.
+
+All three null lanes sit at the floor on test too (0.0007 / 0.0008 / 0.0012), and rung0's `matched` of
+0.159 is again far *below* the mismatched level, reproducing the caption-conditioning failure.
+
+Note the scorer logged "no meta.json for the real one" — the empirical CLAP floor was precomputed for
+val only, so NSF cannot be read off meta.json for test. The per-lane `mismatched` column (0.2723)
+serves the same purpose and is measured on the same rows, so nothing is lost.
+
+### CORRECTION: word ORDER barely matters. Lexical content is what matters.
+
+Job 418010 completed the 2×2 that `reverse` alone could not separate.
+
+| lane | local content | global order | MARGIN | retained |
+|---|---|---|---|---|
+| none | intact | intact | 0.2833 | 100% |
+| **shuffle_500ms** | mostly intact | **destroyed** | 0.1964 | **69%** |
+| shuffle 250 ms | syllable-level | destroyed | 0.1131 | 40% |
+| **local_reverse** | **destroyed** | intact | 0.0108 | **3%** |
+| reverse | destroyed | destroyed | −0.0039 | −2% |
+
+**I was wrong yesterday.** From `shuffle` at 38% I wrote that "sequence carries real information and
+the model is not merely keyword-spotting". The 2×2 says the opposite:
+
+- Destroy **word order** but keep local content (`shuffle_500ms`): **69% survives.**
+- Destroy **local content** but keep order (`local_reverse`): **3% survives** — collapse.
+
+So the model behaves close to a **bag-of-lexical-content reader**. Order is largely dispensable;
+phonetic/lexical identity is nearly everything. And the granularity gradient confirms the mechanism:
+250 ms chunks retain 40% while 500 ms chunks retain 69%, because finer chunks destroy *word integrity*
+as well as order. My 38% figure was confounded by exactly that — I read a word-destruction effect as
+an order effect.
+
+`local_reverse` is the cleanest evidence: it preserves global temporal order, the envelope, the RMS
+and most of the spectrum (correlation 0.760), reversing only *within* 250 ms windows — and it lands at
+3%, essentially the floor, right next to full reversal.
+
+**What this changes for the paper.** The claim "the model performs a linguistic inference" is
+unaffected and now doubly supported. But the sharper statement is available and more accurate: the
+mapping runs on **lexical/phonetic content, largely order-invariant**. That is a more specific and
+more defensible finding than "it uses language", and it predicts something testable — a bag-of-words
+text baseline should do nearly as well as a sequence model on this task.
+
+### A display bug that hid two lanes
+
+The verdict block in the ablation sbatch iterated a hardcoded mode list, so `shuffle_500ms` and
+`local_reverse` generated and scored but never printed — the job's output showed only three lanes and
+read as though the two new ones had not run. The data was in `ablation_scores.json` the whole time.
+Fixed to iterate over what was actually scored. Worth recording because the failure mode is a
+*silently incomplete* result table, which is exactly the kind of thing that gets believed.
+

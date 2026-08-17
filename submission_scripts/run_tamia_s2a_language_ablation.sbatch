@@ -121,12 +121,15 @@ if not p.exists():
 d = json.loads(p.read_text())
 base = d.get("none", {}).get("margin")
 FLOOR = 0.002          # measured unconditional (b0) MARGIN at n=512
-print(f"  {'lane':10s} {'MARGIN':>8} {'audio_r1':>9} {'retained':>9}")
-for m in ("none", "reverse", "shuffle", "lowpass", "noise"):
-    if m not in d: continue
+print(f"  {'lane':15s} {'MARGIN':>8} {'audio_r1':>9} {'retained':>9}")
+# Iterate over what was actually SCORED, not a hardcoded list. Hardcoding meant the shuffle_500ms
+# and local_reverse lanes ran, scored, and were silently absent from the verdict table -- the data
+# was in ablation_scores.json all along but the printed output read as "those lanes did not run".
+ORDER = ["none", "shuffle", "shuffle_500ms", "local_reverse", "lowpass", "noise", "reverse"]
+for m in sorted(d, key=lambda k: (ORDER.index(k) if k in ORDER else 99, k)):
     v = d[m]
-    ret = "" if base in (None, 0) else f"{(v['margin']-FLOOR)/(base-FLOOR)*100:>8.0f}%"
-    print(f"  {m:10s} {v['margin']:>8.4f} {v['audio_r1']:>9.4f} {ret:>9}")
+    ret = "" if base in (None, 0) else f"{(v['margin']-FLOOR)/(base-FLOOR)*100:>7.0f}%"
+    print(f"  {m:15s} {v['margin']:>8.4f} {v['audio_r1']:>9.4f} {ret:>9}")
 print()
 print("  'retained' = fraction of the clean model's above-floor MARGIN that survives.")
 print("  reverse near 0% => the model IS using language (the claim the paper rests on).")
