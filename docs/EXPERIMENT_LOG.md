@@ -897,3 +897,49 @@ points cannot separate "these metrics predict different things" from coincidence
 with a mechanism, and the cheap way to test it is any run where r1 and d2 move in opposite
 directions.
 
+## 2026-08-17: the language ablation — the paper's central claim, measured
+
+Job 417915, 512 val rows per lane, identical rows/seed, O2 checkpoint at s=7.5. Each lane destroys
+one property of the input speech and preserves the rest.
+
+| lane | what survives | MARGIN | audio_r1 (chance 0.0020) | self_sim | retained |
+|---|---|---|---|---|---|
+| none | everything | **0.2835** | **0.0625** | 0.279 | 100% |
+| **reverse** | spectrum, timbre, RMS — **no language** | **−0.0033** | **0.0020** | 0.411 | **−2%** |
+| shuffle | words, not order | 0.1078 | 0.0156 | 0.359 | 38% |
+| lowpass | prosody, not phonetics | 0.1428 | 0.0195 | 0.343 | 50% |
+| noise | energy level only | 0.0058 | 0.0059 | 0.739 | 1% |
+
+**The model is using language.** Time-reversal drives it to *exactly* chance (audio_r1 0.0020 against
+a 1/512 = 0.00195 baseline). This is the strongest single result in the project, because reversal is
+the control that holds the acoustics fixed: measured before running, reversed speech has
+log-spectrum correlation **1.000** to the original and **identical RMS**. So the model is provably
+not reading speaker identity, recording channel, loudness, or any long-term spectral property. The
+only thing reversal removes is linguistic decodability, and removing it removes everything.
+
+**The gradient rules out the lazy alternative explanation.** If the result were just "any degradation
+hurts", the severity ordering would follow acoustic distortion. It does not: a 400 Hz low-pass —
+which throws away most of the spectrum (spec-corr 0.581) — retains **50%**, while reversal, which
+preserves the spectrum *perfectly*, retains **−2%**. Distortion is not what matters; linguistic
+content is.
+
+Reading the middle lanes:
+- **shuffle retains 38%.** Word identities largely survive 250 ms segmentation but order and syntax
+  do not. So roughly a third of the effect is available from a bag of words, and the majority
+  requires the sentence intact.
+- **lowpass retains 50%.** Prosody, rhythm and the coarse spectral envelope carry half the signal.
+  Note this does not isolate prosody cleanly — a 400 Hz cutoff leaves voicing, rhythm and some low
+  formant energy, so read it as "coarse/prosodic information" rather than "prosody alone".
+- **noise retains 1%** with self_sim 0.739, essentially identical to the unconditional b0 lane's
+  0.737. This is the sanity check: with no input information the model reverts exactly to
+  unconditional behaviour, which confirms the pipeline is genuinely responding to its input and that
+  no lane is an artifact of the harness.
+
+`self_sim` corroborates throughout: it rises from 0.279 (clean, matching the 0.2925 diversity of real
+targets) toward 0.411 under reversal and 0.739 under noise — the model progressively falls back to
+emitting one generic ambience as the linguistic information is removed.
+
+**What this licenses us to claim:** that the system performs a linguistic inference from an utterance
+that does not name the sound, rather than exploiting acoustic correlates of the recording. That claim
+now has a control behind it. It is the figure the paper should lead with.
+
