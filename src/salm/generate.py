@@ -107,6 +107,59 @@ class ClapAudioEncoder:
         return F.normalize(feats, dim=-1)
 
 
+def degrade_speech(wav: np.ndarray, mode: str, seed: int) -> np.ndarray:
+    """
+    Destroy a chosen property of the speech while preserving the others.
+
+    THE ABLATION THIS EXISTS FOR. The paper's central claim is that the model infers an *implied*
+    scene from what was SAID -- "you almost hit me, slow down" has no sound-event noun in it, so the
+    mapping requires a linguistic inference step. Nothing we currently measure supports that claim.
+    Our model could equally be reading speaker identity, recording channel, background leakage, or
+    prosodic energy. Every metric we have would look identical.
+
+    Each mode removes one candidate explanation:
+
+      reverse   Time-reverses the waveform. Destroys ALL linguistic content (phonemes run backwards
+                and are not words) while preserving the long-term spectrum, the speaker's voice
+                timbre, the channel, and the energy distribution almost exactly. This is the
+                cleanest single control: if performance survives reversal, the model is not using
+                language at all.
+      shuffle   Chops into 250 ms segments and permutes them. Word identities largely survive at
+                this scale but order and syntax do not. Separates "bag of words is enough" from
+                "the model needs the sentence".
+      lowpass   4th-order Butterworth at 400 Hz. Removes the formant/consonant detail that carries
+                phonetic identity while keeping F0, rhythm and the energy envelope -- i.e. prosody
+                without words. If performance survives this, prosody is doing the work.
+      noise     Replaces speech with Gaussian noise matched to its per-clip RMS. Keeps only the
+                energy level. A near-total destruction control that should land at the
+                unconditional floor; it verifies the pipeline responds to the input at all.
+
+    All modes preserve LENGTH exactly, so the encoder's valid-frame mask is unchanged and cannot
+    itself explain a difference.
+    """
+    if mode == "none":
+        return wav
+    if mode == "reverse":
+        return wav[::-1].copy()
+    if mode == "shuffle":
+        seg = 4000                       # 250 ms at 16 kHz
+        n_full = (len(wav) // seg) * seg
+        if n_full < 2 * seg:
+            return wav                   # too short to shuffle meaningfully; leave it alone
+        segs = wav[:n_full].reshape(-1, seg)
+        order = np.random.default_rng(seed).permutation(len(segs))
+        return np.concatenate([segs[order].reshape(-1), wav[n_full:]]).astype(np.float32)
+    if mode == "lowpass":
+        from scipy.signal import butter, filtfilt
+        b, a = butter(4, 400.0 / (AUDIOLDM_SR / 2), btype="low")
+        return filtfilt(b, a, wav).astype(np.float32)
+    if mode == "noise":
+        rms = float(np.sqrt(np.mean(wav.astype(np.float64) ** 2))) or 1e-6
+        g = np.random.default_rng(seed).standard_normal(len(wav)).astype(np.float32)
+        return (g / (np.sqrt(np.mean(g ** 2)) + 1e-9) * rms).astype(np.float32)
+    raise ValueError(f"unknown degrade mode {mode!r}")
+
+
 def load_trained_unet(pipe, payload: dict, dtype: torch.dtype) -> bool:
     """
     Load the finetuned U-Net weights from a checkpoint into the pipeline.
@@ -183,6 +236,11 @@ def main() -> int:
     ap.add_argument("--split", default="val", choices=["train", "val", "test"])
     ap.add_argument("--num-samples", type=int, default=8, help="-1 for the whole split")
     ap.add_argument("--start-index", type=int, default=0)
+    # Language-degradation ablation. Applied to the speech waveform before the frozen encoder, so
+    # the model and every other setting are untouched -- only the information in the input changes.
+    ap.add_argument("--degrade", default="none",
+                    choices=["none", "reverse", "shuffle", "lowpass", "noise"],
+                    help="destroy one property of the input speech; see degrade_speech()")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--steps", type=int, default=100)
@@ -257,6 +315,9 @@ def main() -> int:
             negative = None
         else:
             wavs = [load_waveform_mono_16k(str(r.speech_path)) for r in batch]
+            if args.degrade != "none":
+                wavs = [degrade_speech(w, args.degrade, args.seed + i)
+                        for i, w in enumerate(wavs)]
 
             if args.mode == "rung1":
                 cond = clap(wavs)
@@ -340,6 +401,7 @@ def main() -> int:
         "num_samples": len(manifest_rows),
         "steps": args.steps,
         "guidance_scale": args.guidance_scale,
+        "degrade": args.degrade,
         "seed": args.seed,
         "audioldm_model_id": project_paths.AUDIOLDM_MODEL_ID,
         # Provenance: which weights actually produced these files. Without this, a directory of
