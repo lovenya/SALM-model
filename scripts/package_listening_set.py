@@ -83,12 +83,30 @@ def main() -> int:
         flag = "" if n == len(ordered) else f"   <-- only {n}/{len(ordered)}"
         log(f"    {label:22s} {n}{flag}")
 
+    # Fall back to the manifest when a split has no precomputed features. generate.py reads the
+    # manifest directly, so the TEST split can be generated and listened to without ever running a
+    # latent-precompute job -- requiring the index here would have blocked that for no reason.
     truth = {}
     idx = project_paths.FEATURES_ROOT / args.direction / args.split / "index.jsonl"
-    with idx.open() as f:
-        for line in f:
-            r = json.loads(line)
-            truth[r["sample_id"]] = r
+    if idx.exists():
+        with idx.open() as f:
+            for line in f:
+                r = json.loads(line)
+                truth[r["sample_id"]] = r
+        log(f"ground truth from features index ({args.split})")
+    else:
+        from salm.data.manifest import load_manifest
+
+        for r in load_manifest(args.direction, args.split):
+            truth[r.sample_id] = {
+                "speech_file": str(r.speech_path),
+                "audio_file": str(r.audio_path),
+                "speech_text": getattr(r, "speech_text", "") or "",
+                "audio_cap": getattr(r, "audio_cap", "") or "",
+                "speaker_emotion": getattr(r, "speaker_emotion", "") or "?",
+                "speaker_gender": getattr(r, "speaker_gender", "") or "?",
+            }
+        log(f"ground truth from manifest (no features index for '{args.split}')")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
