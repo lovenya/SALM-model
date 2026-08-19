@@ -106,11 +106,16 @@ for lane in "${LANE_ARR[@]}"; do
     (
         for metric in "${METRIC_ARR[@]}"; do
             echo "  [$lane] $metric on GPU $GPU"
-            CUDA_VISIBLE_DEVICES=$GPU python "$EVAL_REPO/evaluate.py" \
+            # MUST run with cwd = the evaluator's repo root. evaluate.py resolves
+            # `configs/model_capabilities.json` RELATIVELY, so invoking it by absolute path from
+            # our repo made every one of the 20 invocations die instantly with
+            # FileNotFoundError: 'configs/model_capabilities.json' -- the job "completed" in 9 s
+            # having computed nothing. A subshell keeps the cd local to this lane.
+            ( cd "$EVAL_REPO" && CUDA_VISIBLE_DEVICES=$GPU python evaluate.py \
                 --model salm_e2e --stage s2a --direction s2a \
                 --evaluated-run-id "salm_e2e_${SPLIT}_${lane}" \
                 --split "$SPLIT" --manifest "$MF" --metrics "$metric" \
-                > "$LOG_DIR/${lane}__${metric}.log" 2>&1 \
+                > "$LOG_DIR/${lane}__${metric}.log" 2>&1 ) \
                 || echo "  WARN [$lane] $metric FAILED (see $LOG_DIR/${lane}__${metric}.log)" >&2
         done
     ) &
