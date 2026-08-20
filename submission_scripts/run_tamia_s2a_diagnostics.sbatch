@@ -73,10 +73,12 @@ fi
 
 # GPU 2/3 -- retrieval in each embedding space
 ( CUDA_VISIBLE_DEVICES=2 python scripts/retrieval_baseline.py \
-    --space whisper --num-samples "$NUM_GEN" --out-dir "$OUT/retrieval_whisper" \
+    --space whisper --split "${SPLIT:-val}" --num-samples "$NUM_GEN" \
+    --out-dir "$OUT/retrieval_whisper" \
     > "$LOG_DIR/retrieval_whisper.log" 2>&1 ) & P2=$!
 ( CUDA_VISIBLE_DEVICES=3 python scripts/retrieval_baseline.py \
-    --space clap --num-samples "$NUM_GEN" --out-dir "$OUT/retrieval_clap" \
+    --space clap --split "${SPLIT:-val}" --num-samples "$NUM_GEN" \
+    --out-dir "$OUT/retrieval_clap" \
     > "$LOG_DIR/retrieval_clap.log" 2>&1 ) & P3=$!
 
 FAIL=0

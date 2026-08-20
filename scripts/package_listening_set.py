@@ -209,6 +209,36 @@ def main() -> int:
     ]
     (out / "INDEX.md").write_text("\n".join(lines) + "\n")
 
+    # ---------------------------------------------------- samples.json
+    # One machine-readable file for the whole set, so a supervisor or a reviewer can read the
+    # transcript and target caption per sample without opening 50 about.txt files.
+    meta = {
+        "split": args.split,
+        "direction": args.direction,
+        "num_samples": len(ordered),
+        "lanes": [
+            {"file_prefix": f"{i:02d}_{label}", "label": label, "source_dir": str(p),
+             **{k: v for k, v in scores.get(p.name, {}).items()
+                if k in ("n", "clap_audio_cos", "clap_audio_cos_mismatched", "margin",
+                         "audio_r1", "audio_r1_chance", "self_sim", "guidance_scale",
+                         "checkpoint_epoch")}}
+            for i, (label, p, _) in enumerate(lanes, start=2)
+        ],
+        "samples": [
+            {
+                "sample_id": sid,
+                "speech_text": truth.get(sid, {}).get("speech_text", ""),
+                "reference_caption": truth.get(sid, {}).get("audio_cap", ""),
+                "speaker_emotion": truth.get(sid, {}).get("speaker_emotion", ""),
+                "speaker_gender": truth.get(sid, {}).get("speaker_gender", ""),
+                "files": sorted(f.name for f in (out / sid).glob("*.wav")),
+            }
+            for sid in ordered
+        ],
+    }
+    (out / "samples.json").write_text(json.dumps(meta, indent=2))
+    log(f"wrote {out/'samples.json'}")
+
     log(f"placed {placed} files into {out}")
     log(f"read {out}/INDEX.md first")
     return 0
