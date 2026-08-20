@@ -243,6 +243,57 @@ Ordered by information per GPU-hour, which is how every earlier decision here wa
     Base config is 0.1 so the cohort is safe, but a sweep of that knob would hit it.
   - `train_ldm.py` saves `cuda_rng` but never restores it, so "exact resume" is not bit-exact.
 
+### Added 2026-08-20 (from a walkthrough of the objective and metrics)
+
+- **[IMPL — IMMEDIATE] Make `val_clap_r1` full-set instead of within-batch.** It currently ranks each
+  conditioner output against only the **B candidates in its own batch**, so chance is `1/batch_size`
+  (0.0625 at B=16). Two consequences: r1 is **not comparable across batch sizes**, which blocks the
+  planned batch-size increase outright; and at B=1 the metric is vacuous (chance = 1.0), which is why
+  the code has an `n >= 2` guard. Ranking against all 1,887 val targets instead is a **3.9 MB**
+  matrix — trivially cheap — batch-independent, and by the design review roughly **5–9× more
+  sensitive** in our operating regime (r1@16 = 0.564 maps to full-set R@1 ≈ 0.03–0.06). Within-batch
+  was simply the easy thing to write. Report `cond_R@1_full` and `cond_MRR` alongside.
+
+- **[IMPL] Per-group gradient clipping, so λ can actually be swept.** `clip_grad_norm_` is applied to
+  the **joint** conditioner + U-Net parameter list at `grad_clip=1.0`. The alignment term produces
+  gradient only into the conditioner, but it inflates the *joint* norm, so clipping rescales the
+  U-Net's gradient by the same factor. At λ=2000 the U-Net's effective LR would fall to roughly
+  `1e-5 / 2000 = 5e-9` — **silently frozen**. And we know a non-finetuned U-Net produces nothing
+  (pristine lane MARGIN −0.0036), so a naive high-λ run would fail for a reason unrelated to the
+  objective's merit. Clip per group (or scale `lr_unet` in compensation) before sweeping λ above 1.0.
+  **Correction to the record:** "λ makes no difference, question closed" is too strong. What is
+  established is that λ ∈ [0.2, 1.0] makes no difference. Above 1.0 is untested and currently
+  untestable.
+
+- **[IMPL — HIGH PRIORITY] Try real cross-attention conditioning (Tier 3).** User's call, 2026-08-20.
+  Context that makes this well-posed rather than speculative: our U-Net *already has* cross-attention
+  blocks (`CrossAttnDownBlock2D` ×3, `CrossAttnUpBlock2D` ×3, `cross_attention_dim`
+  [128,256,384,640]), pretrained and currently unused because we pass `encoder_hidden_states=None`.
+  **AudioLDM 1's own pipeline also passes None** (`pipeline_audioldm.py:522`), so we are faithful to
+  it — this is not a deviation we introduced. Feeding a *sequence* would let each of the 256 latent
+  time positions attend to different content instead of receiving one broadcast bias.
+  Caveat to keep honest: a direct ablation (arXiv 2501.14680) found mean-pooled FiLM **beat**
+  cross-attention alone and the combination (FAD 1.89 / 2.02 / 1.94), so pooled conditioning is not
+  inherently deficient. And the 2×2 ablation showed our mapping is largely **order-invariant** on the
+  input side, which weakens the a-priori case. So pair this with the temporal-margin metric, or the
+  result will be uninterpretable either way.
+
+- **[IMPL] Restate the data-sparsity motivation.** "13,959 unique captions across 15,033 pairs = 1.1
+  per scene" is a statement about caption **strings**. Measured in CLAP-audio space, an ε-net at
+  similarity > 0.75 collapses 4,000 sampled clips to ~1,061 groups ≈ **3.8 clips per acoustically
+  distinguishable scene** — so caption uniqueness overstates the sparsity by 2–4×. Any reviewer can
+  compute this in one line of numpy. Restate as "13,959 unique caption strings, though roughly 2–4
+  clips per acoustically distinguishable scene". **The O2 result is empirical and does not depend on
+  this framing** — only the motivation paragraph needs the fix.
+
+- **[NOTE] λ=2000 is not translatable to our parameterisation, and we should say so.** Verified from
+  the paper: `L = L_DDPM + λ·E_n[w(n)·‖E_audio − E_latent,n‖²]`, `w(n) = 10^(−n/200)`, λ = 2000 (or
+  1000 with a tuning layer), FAD 7.47 → 6.52. Their term is **unnormalised MSE** damped by a weight
+  whose mean over uniform n is ≈ **0.087**, so ~92% of its magnitude is removed before λ applies.
+  Ours is `(1 − cos)` on unit vectors, bounded [0,2]. We can establish the number does not transfer;
+  we **cannot** compute our equivalent λ without their embedding magnitudes. So λ=1.0 was a
+  scale-matched guess, not a derived translation — state it that way if asked.
+
 ## Deliberately chosen against (so we stop re-proposing these)
 
 - **AudioGen / autoregressive.** Not on tooling grounds — the user correctly pushed back that we can
