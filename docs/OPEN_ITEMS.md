@@ -265,6 +265,19 @@ Ordered by information per GPU-hour, which is how every earlier decision here wa
   established is that λ ∈ [0.2, 1.0] makes no difference. Above 1.0 is untested and currently
   untestable.
 
+- **[IMPL — carry into the A2S / bidirectional phase] Temporal conditioning is likely mandatory for
+  speech, not optional.** User's note, 2026-08-20. Everything measured so far is S2A, where the
+  target is ~10 s of *ambience* — largely stationary, and where our 2×2 showed the mapping is
+  order-invariant on the input side. **Speech generation is the opposite case**: a spoken utterance
+  is strongly ordered, phoneme timing matters, and a single global 512-d vector broadcast identically
+  across all 256 latent positions cannot express "say this word, then that one". So when A2S starts:
+  - assume **sequence conditioning + cross-attention are required**, not experimental — the
+    `CrossAttn` blocks are already pretrained and unused;
+  - build the **temporal-margin metric first**, because without it a temporal fix cannot be
+    evaluated either way;
+  - do not carry the S2A order-invariance finding across as if it generalises — it is a property of
+    *ambient targets*, and speech should be expected to behave oppositely.
+
 - **[IMPL — HIGH PRIORITY] Try real cross-attention conditioning (Tier 3).** User's call, 2026-08-20.
   Context that makes this well-posed rather than speculative: our U-Net *already has* cross-attention
   blocks (`CrossAttnDownBlock2D` ×3, `CrossAttnUpBlock2D` ×3, `cross_attention_dim`
