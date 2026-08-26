@@ -1,0 +1,32 @@
+# Overlay ON TOP of o2_align.yaml (which sets lambda_align: 1.0) -- swaps the O2 loss from
+# plain cosine to a batch contrastive (InfoNCE) term. Apply both, in this order, as EXTRA
+# configs: the base run already established lambda_align=1.0 is the operating point; this
+# only changes WHICH loss uses that lambda.
+#
+# Motivation, from the 2026-08-24 A2S probes (job 425737/425738):
+#   - A1 (+O2, plain cosine): val_clap_r1 peaked at 0.354 (epoch 6), settled at 0.327 by
+#     epoch 39, while train-side alignment cosine kept climbing toward 0.95 -- a widening
+#     train/val gap the plain S2A O2 run never showed.
+#   - A closed-form ridge regression on the SAME (mean-pooled ambient CLAP, CLAP-text)
+#     pairs -- no training loop, no gradient descent -- reached R@1@16 ~0.45-0.46, HIGHER
+#     than A1's trained 32M-param conditioner ever got, using LESS input information
+#     (mean-pooled, not the full 32-frame sequence).
+#   - Read together: real, decodable signal exists in the data, and the trained network is
+#     underperforming a trivial linear baseline on the metric that matters. The plain
+#     cosine loss has no repulsion term -- it only pulls cond_i toward target_i, never away
+#     from target_j -- so nothing stops every row's output drifting toward a shared
+#     centroid while the loss keeps falling. That is exactly the failure mode a batch
+#     contrastive loss is built to prevent, and it optimizes retrieval accuracy directly
+#     rather than a cosine proxy for it.
+#
+# Verified offline before this config was used for anything (see infonce_loss() in
+# train_ldm.py): random init ~1.0 (comparable scale to the cosine term), a perfect match
+# ~0, and -- the property that actually motivates this -- a CENTROID-COLLAPSED prediction
+# scores ~1.04 under InfoNCE (still near-random) but only ~0.74 under plain cosine (looks
+# like real progress). That gap IS the bug this config tests whether training exploits.
+#
+# Comparison rule: same lambda_align, same architecture, same epochs/lr_total_steps as the
+# run this overlays -- only align_loss differs, so any gap is attributable to the loss.
+
+align_loss: infonce
+align_temp: 0.07

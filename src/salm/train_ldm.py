@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -36,6 +37,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from configs import paths as project_paths  # noqa: E402
 from salm.data.dataset import S2ALatentDataset, collate  # noqa: E402
+from salm.a2s.wer import CTC_BLANK, ctc_encode  # noqa: E402  (O-F only, cost-free otherwise)
 # Encoder and conditioner are resolved through salm.architectures at runtime, so this
 # module deliberately imports neither directly.
 
@@ -50,6 +52,18 @@ class TrainConfig:
     train_split: str = "train"
     val_split: str = "val"
     speech_seconds: float = 16.0
+
+    # ---- A2S only (direction: a2s). Ignored by S2A runs. ----
+    # Where scripts/a2s/precompute_a2s_conditioning.py wrote the CLAP condition frames.
+    # A2S runs no encoder in the loop at all; see salm/encoders/precomputed.py for why.
+    cond_features_root: str = str(project_paths.OUTPUTS_ROOT / "features_a2s_cond")
+    # Which precomputed embedding the O2 alignment loss pulls the conditioner toward:
+    # "text"   = CLAP-text of the transcript      (expected winner; already in CLAP space)
+    # "speech" = CLAP-audio of the target speech  (the direct S2A mirror; expected to be
+    #            near-collinear and therefore useless -- the precompute script measures it)
+    # ""       = no alignment target, which also disables the val CLAP metrics.
+    # Choose by the pairwise-spread numbers in the cond cache's meta.json, not by taste.
+    align_target: str = "text"
 
     # model
     # `arch` names an entry in salm.architectures and also groups runs on disk as
@@ -114,10 +128,81 @@ class TrainConfig:
     #
     # 0.0 = off, which keeps every existing config bit-identical in behaviour.
     lambda_align: float = 0.0
+    # ---- 2026-08-24: which O2 loss to use. Motivated by a measured gap on A2S -- a
+    # closed-form ridge regression on the SAME (input, target) pairs beat the trained
+    # conditioner's own val_clap_r1 (0.45 vs 0.35 at batch-16), despite using less input
+    # information (mean-pooled, not the full sequence). The plain cosine term has no
+    # repulsion: it only pulls cond_i toward target_i and never pushes it away from
+    # target_j!=i, so nothing stops every row's prediction drifting toward a shared
+    # centroid while still lowering the loss. InfoNCE adds that repulsion directly, against
+    # the SAME quantity the project already reports (retrieval accuracy) rather than a proxy
+    # for it.
+    #   "cosine"  -- 1 - cos(cond_i, target_i), the original O2 term. Unchanged default, so
+    #                every existing config and checkpoint reproduces exactly as before.
+    #   "infonce" -- symmetric batch contrastive loss (see infonce_loss()). Negatives are the
+    #                OTHER rows in the same per-GPU batch, matching val_clap_r1's own
+    #                per-batch chance convention. NOT gathered across ranks -- that would
+    #                need an all-gather with gradient flow through DDP, a bigger change than
+    #                this experiment calls for; deferred.
+    align_loss: str = "cosine"
+    # InfoNCE temperature. Divides the cosine-similarity logits before the softmax; smaller
+    # sharpens the distribution. 0.07 is the standard CLIP/SimCLR starting point, unrelated
+    # to anything in this codebase -- worth sweeping if this is adopted rather than trusted.
+    align_temp: float = 0.07
     # Cosine ramp for lambda_align over this many optimizer steps (0 = constant from step 0).
     # "REPA Works Until It Doesn't" (arXiv 2505.16792) argues for decaying an alignment term
     # rather than holding it; this is the knob for that experiment, unused by default.
     align_warmup_steps: int = 0
+
+    # ---- O-F, 2026-08-24 (a2s only): content loss on the DECODED mel, not an embedding.
+    #
+    # Motivated by the oracle-conditioning ablation (job 426005): feeding the row's TRUE
+    # CLAP-text embedding straight to class_labels -- removing 100% of conditioner error --
+    # still produced incomprehensible speech, by ear. That means the bottleneck is CLAP-
+    # text's resolution on word content, not the conditioner's ability to reach it, and no
+    # amount of further O2 tuning (InfoNCE, more epochs, bigger conditioner) can fix it,
+    # because the PERFECT version of that target already fails to. O-F sidesteps the
+    # embedding-target question entirely: reconstruct x0-hat at low-noise timesteps (where
+    # the estimate is trustworthy), decode it through the VAE ONLY (no vocoder needed -- a
+    # frozen CTC head can score a mel directly), and score the decoded mel against the real
+    # transcript with a small CTC model trained specifically on AudioLDM's own mel frontend
+    # (scripts/a2s/train_ctc_probe.py -- no off-the-shelf ASR model matches its 64-mel/16kHz
+    # config). Additive to O2, not a replacement: they supervise different things (which
+    # scene-level embedding to steer toward, vs whether the decoded content matches words).
+    #
+    # 0.0 = off, bit-identical to every existing config.
+    lambda_ctc: float = 0.0
+    # Frozen checkpoint from scripts/a2s/train_ctc_probe.py (checkpoint_best.pt). Required
+    # when lambda_ctc > 0; there is no sensible default path since it names a specific run.
+    ctc_checkpoint: str = ""
+    # Only apply the CTC term to rows whose (already-drawn, for the main diffusion loss)
+    # timestep falls under this fraction of num_train_timesteps. x0-hat is only a trustworthy
+    # estimate of the clean latent at low noise; at high t it is far too noisy for "does this
+    # decode to the right words" to mean anything. Reuses the SAME per-example timesteps the
+    # main loss already drew -- no extra U-Net forward pass -- so on a given step this is a
+    # PARTIAL-BATCH term (expect ~ctc_max_t_frac of the batch to qualify); it contributes 0
+    # on a step where no row happens to draw a low t, which is fine averaged over many steps.
+    ctc_max_t_frac: float = 0.25
+
+    # ---- Rank 2, 2026-08-26 (a2s only): genuine SEQUENCE content conditioning, via a new
+    # gated cross-attention branch on the pretrained U-Net (diffusers' own
+    # IPAdapterAttnProcessor2_0 -- see salm.a2s.content_adapter for the full mechanism and
+    # why it, not a hand-rolled module, is used). Motivated directly by AudioLDM 2's own
+    # paper: they use pooling rate lambda=1 (512 tokens/10s, ~51.2 tok/s) for TTS
+    # specifically, vs lambda=8 (~6.4 tok/s) for general audio, because pooled features lose
+    # the detail speech needs. Our O2/O-F pathway delivers ~0 tok/s (one pooled vector).
+    #
+    # This is a FALSIFICATION TEST, not a production design: the content sequence is the
+    # frozen CTC probe's encoder output on the TARGET SPEECH's own mel (oracle content --
+    # available during training, never at A2S inference time). The question this answers is
+    # narrow and cheap to answer: can the U-Net learn to USE a real content sequence at all,
+    # via a genuinely new cross-attention channel, within a handful of epochs? If not, either
+    # the wiring is wrong or the hypothesis needs rethinking -- either way, cheap to find out
+    # before building a real (non-oracle, inference-available) content source.
+    #
+    # Reuses ctc_checkpoint (the same probe O-F trains against, if lambda_ctc > 0 too) -- one
+    # checkpoint, two independent uses (a frozen scorer for O-F; a frozen encoder here).
+    use_content_xattn: bool = False
 
     # runtime
     amp_dtype: str = "bf16"       # H100: bf16 needs no loss scaling
@@ -260,6 +345,37 @@ _HIGHER_IS_BETTER = {"val_clap_r1", "val_clap_r5", "val_clap_cos",
                      "val_d1_gap", "val_d2_gap", "val_d2_gap_zero"}
 
 
+def infonce_loss(pred: torch.Tensor, target: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
+    """
+    Symmetric batch contrastive loss (CLIP/SimCLR-style), as an alternative O2 term.
+
+    Unlike `1 - cos(pred_i, target_i)`, this has an explicit REPULSION term: row i's
+    prediction is pushed away from every OTHER row's target in the batch, not just pulled
+    toward its own. That directly targets the failure mode plain cosine cannot see --
+    every row's output drifting toward a shared centroid while the loss keeps falling,
+    because cosine-to-own-target never penalizes looking like row j's target too.
+
+    Negatives are the other B-1 rows of THIS batch only (no cross-rank gather), so the
+    effective negative count is `batch_size`, matching val_clap_r1's own chance convention
+    (1/batch_size) -- the two are then directly comparable.
+
+    pred, target: (B, D), need not be pre-normalized. Returns a scalar in roughly [0, ~1] at
+    random init for typical batch sizes (softmax over near-uniform logits gives
+    cross_entropy ~= log(B), and dividing by log(B) below keeps this at the same rough scale
+    as the cosine term's ~1.0-at-init, so an existing lambda_align is at least in the right
+    neighbourhood if this is swapped in -- NOT a derived equivalence, just close enough to
+    start a sweep from rather than guessing blind.
+    """
+    p = F.normalize(pred.float(), dim=-1)
+    t = F.normalize(target.float(), dim=-1)
+    logits = p @ t.T / temperature                      # (B, B); logits[i, j] = sim(pred_i, target_j)
+    labels = torch.arange(logits.shape[0], device=logits.device)
+    loss_pred_to_target = F.cross_entropy(logits, labels)      # row i should point at target_i
+    loss_target_to_pred = F.cross_entropy(logits.T, labels)    # target_i should be found by pred_i
+    raw = 0.5 * (loss_pred_to_target + loss_target_to_pred)
+    return raw / math.log(logits.shape[0])
+
+
 def timestep_buckets(num_train_timesteps: int, n_buckets: int = 4) -> list[tuple[int, int]]:
     """
     Edges for per-timestep-bucket validation loss.
@@ -368,18 +484,59 @@ def main() -> int:
         log("          the flat diffusion loss is the only signal, which is not enough.")
         return None
 
-    val_clap_dir = _clap_dir(cfg.val_split, required=False)
-    train_clap_dir = _clap_dir(cfg.train_split, required=cfg.lambda_align > 0.0)
+    # A2S reads a different cache shape: the condition is precomputed CLAP frames rather
+    # than a waveform, and the alignment target is chosen by name. Everything downstream --
+    # the loss, CFG, the val metrics, checkpointing -- is identical, which is why this is a
+    # branch here rather than a second trainer.
+    is_a2s = cfg.direction == "a2s"
+    collate_fn = collate
+    cond_feature_dim = 0
 
-    train_ds = S2ALatentDataset(
-        train_dir, speech_seconds=cfg.speech_seconds, clap_dir=train_clap_dir
-    )
-    val_ds = S2ALatentDataset(
-        val_dir, speech_seconds=cfg.speech_seconds, clap_dir=val_clap_dir
-    )
-    log(f"train: {len(train_ds)} | val: {len(val_ds)} | latent shape {train_ds.latent_shape}")
-    log(f"val CLAP metrics (cos + retrieval r1/r5): {'ON' if val_clap_dir else 'OFF'}")
-    log(f"train CLAP targets (for O2 alignment):    {'ON' if train_clap_dir else 'OFF'}")
+    if is_a2s:
+        from salm.a2s.dataset import A2SLatentDataset, a2s_collate
+
+        collate_fn = a2s_collate
+        cond_train = Path(cfg.cond_features_root) / cfg.train_split
+        cond_val = Path(cfg.cond_features_root) / cfg.val_split
+        align = cfg.align_target or None
+        if cfg.lambda_align > 0.0 and not align:
+            raise SystemExit(
+                f"lambda_align={cfg.lambda_align} needs an alignment target, but "
+                "align_target is empty. Set align_target: text (or speech), or "
+                "lambda_align: 0.0 for the plain diffusion objective."
+            )
+        train_ds = A2SLatentDataset(train_dir, cond_train, align_target=align)
+        val_ds = A2SLatentDataset(val_dir, cond_val, align_target=align)
+        # The select_metric guard further down reads this to decide whether a val_clap*
+        # metric can ever be computed. A2S keeps its alignment embeddings in the condition
+        # cache rather than a separate CLAP dir, so point it there.
+        val_clap_dir = cond_val if val_ds.align_target is not None else None
+        cond_feature_dim = train_ds.cond_feature_dim
+        if val_ds.cond_feature_dim != cond_feature_dim:
+            raise SystemExit(
+                f"train/val condition caches disagree on width "
+                f"({cond_feature_dim} vs {val_ds.cond_feature_dim})."
+            )
+        log(f"train: {len(train_ds)} | val: {len(val_ds)} | "
+            f"latent shape {train_ds.latent_shape}")
+        log(f"A2S condition: {train_ds.cond_frames} frames x {cond_feature_dim} "
+            f"(precomputed, no encoder in the loop)")
+        log(f"alignment target: {train_ds.align_name or 'OFF'}  "
+            f"(lambda_align={cfg.lambda_align})")
+    else:
+        val_clap_dir = _clap_dir(cfg.val_split, required=False)
+        train_clap_dir = _clap_dir(cfg.train_split, required=cfg.lambda_align > 0.0)
+
+        train_ds = S2ALatentDataset(
+            train_dir, speech_seconds=cfg.speech_seconds, clap_dir=train_clap_dir
+        )
+        val_ds = S2ALatentDataset(
+            val_dir, speech_seconds=cfg.speech_seconds, clap_dir=val_clap_dir
+        )
+        log(f"train: {len(train_ds)} | val: {len(val_ds)} | "
+            f"latent shape {train_ds.latent_shape}")
+        log(f"val CLAP metrics (cos + retrieval r1/r5): {'ON' if val_clap_dir else 'OFF'}")
+        log(f"train CLAP targets (for O2 alignment):    {'ON' if train_clap_dir else 'OFF'}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True) if world_size > 1 else None
     train_loader = DataLoader(
@@ -388,7 +545,7 @@ def main() -> int:
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         num_workers=cfg.num_workers,
-        collate_fn=collate,
+        collate_fn=collate_fn,
         pin_memory=True,
         drop_last=True,
         persistent_workers=cfg.num_workers > 0,
@@ -409,7 +566,7 @@ def main() -> int:
         shuffle=False,
         sampler=val_sampler,
         num_workers=max(2, cfg.num_workers // 2),
-        collate_fn=collate,
+        collate_fn=collate_fn,
         pin_memory=True,
     )
 
@@ -433,10 +590,113 @@ def main() -> int:
         f"train_timesteps={noise_scheduler.config.num_train_timesteps}, "
         f"prediction_type={noise_scheduler.config.prediction_type}")
 
+    # O-F: the VAE decoder (decode only -- never trained) and the frozen CTC content-loss
+    # head. Loaded here, not at import time, so every run without lambda_ctc pays zero cost
+    # -- no extra weights in memory, no extra startup time.
+    vae = ctc_head = None
+    if cfg.lambda_ctc > 0.0:
+        # O-F is wired only into the O2 training branch (it needs the x0_hat/timesteps
+        # extras that branch already requests), and it is designed as additive to O2, not a
+        # replacement -- so requiring lambda_align > 0 here is the actual design, not a
+        # shortcut. A config with lambda_ctc > 0 and lambda_align == 0 would otherwise route
+        # into the plain-diffusion branch and silently never apply the CTC term at all.
+        if cfg.lambda_align <= 0.0:
+            raise SystemExit(
+                "lambda_ctc > 0 requires lambda_align > 0 too -- O-F is additive to O2, "
+                "wired into the same training branch. Set lambda_align (e.g. 1.0, matching "
+                "o2_align.yaml) alongside it."
+            )
+        if not cfg.ctc_checkpoint:
+            raise SystemExit(
+                "lambda_ctc > 0 but ctc_checkpoint is empty. Point it at a checkpoint from "
+                "scripts/a2s/train_ctc_probe.py (checkpoint_best.pt), or set lambda_ctc: 0.0."
+            )
+        ctc_ckpt_path = Path(cfg.ctc_checkpoint)
+        if not ctc_ckpt_path.exists():
+            raise SystemExit(f"ctc_checkpoint does not exist: {ctc_ckpt_path}")
+
+        log(f"Loading VAE decoder for O-F (lambda_ctc={cfg.lambda_ctc}) ...")
+        from diffusers import AutoencoderKL
+
+        vae = AutoencoderKL.from_pretrained(
+            cfg.audioldm_model_id, subfolder="vae", torch_dtype=torch.float32
+        ).to(device).eval()
+        for p in vae.parameters():
+            p.requires_grad_(False)
+
+        log(f"Loading frozen CTC head from {ctc_ckpt_path} ...")
+        from salm.a2s.ctc_probe import SimpleCTCASR, CTC_FRAMES_OUT
+
+        ctc_head = SimpleCTCASR().to(device).eval()
+        ctc_payload = torch.load(ctc_ckpt_path, map_location=device, weights_only=False)
+        ctc_head.load_state_dict(ctc_payload["model"])
+        for p in ctc_head.parameters():
+            p.requires_grad_(False)
+        # cuDNN's fused RNN kernel only allocates the reserve-space its OWN backward pass
+        # needs when the module is in train() mode -- eval() skips it entirely, so
+        # backward() through a frozen-but-eval GRU fails outright with "cudnn RNN backward
+        # can only be called in training mode", even though nothing about it gets updated
+        # (requires_grad_(False) above already guarantees that). BatchNorm2d in `conv` stays
+        # on eval() (frozen running stats, the actual reason for freezing at all); only the
+        # GRU submodule needs train() for cuDNN's backward path, which as a side effect
+        # re-enables its inter-layer dropout (0.1, between 2 layers) -- an acceptable, minor
+        # source of stochasticity in an already-converged, frozen scorer, not a correctness
+        # issue, since none of its weights ever move.
+        ctc_head.rnn.train()
+        log(f"    CTC probe: epoch={ctc_payload.get('epoch')} "
+            f"best_wer={ctc_payload.get('best_wer')}")
+        ctc_loss_fn = torch.nn.CTCLoss(blank=CTC_BLANK, zero_infinity=True)
+
+    # Rank 2: content cross-attention. Independent of O-F (lambda_ctc) -- either can be on
+    # without the other -- but shares the SAME ctc_head/checkpoint if lambda_ctc already
+    # loaded one, rather than loading the model twice.
+    content_extractor = None
+    if cfg.use_content_xattn:
+        if cfg.direction != "a2s":
+            raise SystemExit("use_content_xattn is A2S-only (the oracle content source is "
+                              "the TARGET SPEECH, which only exists for a2s).")
+        if not cfg.ctc_checkpoint:
+            raise SystemExit(
+                "use_content_xattn requires ctc_checkpoint (same checkpoint O-F uses, or "
+                "any scripts/a2s/train_ctc_probe.py checkpoint) -- it is the frozen encoder "
+                "that produces the oracle content sequence."
+            )
+        ctc_ckpt_path = Path(cfg.ctc_checkpoint)
+        if not ctc_ckpt_path.exists():
+            raise SystemExit(f"ctc_checkpoint does not exist: {ctc_ckpt_path}")
+
+        if ctc_head is None:
+            log(f"Loading frozen CTC head from {ctc_ckpt_path} (content-xattn source) ...")
+            from salm.a2s.ctc_probe import SimpleCTCASR
+
+            ctc_head = SimpleCTCASR().to(device).eval()
+            ctc_payload = torch.load(ctc_ckpt_path, map_location=device, weights_only=False)
+            ctc_head.load_state_dict(ctc_payload["model"])
+            for p in ctc_head.parameters():
+                p.requires_grad_(False)
+            ctc_head.rnn.train()   # see the O-F block above for why (cuDNN backward quirk)
+            log(f"    CTC probe: epoch={ctc_payload.get('epoch')} "
+                f"best_wer={ctc_payload.get('best_wer')}")
+
+        from salm.a2s.content_adapter import install_content_cross_attention
+        from salm.data.frontend import MelConfig, MelExtractor
+
+        content_extractor = MelExtractor(MelConfig(norm_mode="none"), device=device)
+        adapted = install_content_cross_attention(unet, content_dim=ctc_head.encoder_dim)
+        log(f"    installed content cross-attention on {len(adapted)} attn2 layers "
+            f"(content_dim={ctc_head.encoder_dim}): {adapted}")
+
     log(f"Building architecture {cfg.arch!r} from the registry ...")
     from salm.architectures import build as build_arch
 
-    components = build_arch(cfg.arch, asdict(cfg), device, output_dim=cond_dim)
+    # cond_feature_dim comes from the cache's own shape, so the conditioner's input width
+    # can never drift away from what is actually on disk. Zero for S2A, which reads it from
+    # the live encoder instead.
+    arch_cfg = asdict(cfg)
+    arch_cfg["cond_feature_dim"] = cond_feature_dim
+    if is_a2s:
+        arch_cfg["cond_features_dir"] = str(Path(cfg.cond_features_root) / cfg.train_split)
+    components = build_arch(cfg.arch, arch_cfg, device, output_dim=cond_dim)
     encoder = components.encoder
     conditioner = components.conditioner
     log(f"    frozen encoder feature_dim={encoder.feature_dim}")
@@ -489,11 +749,20 @@ def main() -> int:
     log(f"steps/epoch={steps_per_epoch} total_steps={total_steps}")
 
     def compute_condition(batch) -> torch.Tensor:
-        """Frozen encoder -> conditioner -> (B, cond_dim) L2-normalized CLAP-space vector."""
-        with torch.no_grad():
-            feats, mask = encoder.encode_with_mask(
-                batch["speech"].to(device), batch["speech_length"]
-            )
+        """Frozen features -> conditioner -> (B, cond_dim) L2-normalized CLAP-space vector.
+
+        A2S reads the frozen encoder's output from the batch, because it was precomputed;
+        S2A runs the encoder here. Either way the conditioner sees the same (B, T, D) + mask
+        contract, so nothing downstream can tell the difference.
+        """
+        if "cond_features" in batch:
+            feats = batch["cond_features"].to(device, non_blocking=True)
+            mask = batch["cond_mask"].to(device, non_blocking=True)
+        else:
+            with torch.no_grad():
+                feats, mask = encoder.encode_with_mask(
+                    batch["speech"].to(device), batch["speech_length"]
+                )
         return conditioner(feats, mask=mask)
 
     def diffusion_loss(
@@ -535,13 +804,37 @@ def main() -> int:
         if train:
             cond = conditioner_module.apply_cfg_dropout(cond, cfg.cfg_dropout_prob)
 
-        # AudioLDM conditions via class_labels (a single global vector), NOT via
-        # cross-attention token sequences -- hence encoder_hidden_states=None.
+        # AudioLDM conditions via class_labels (a single global vector); Rank 2
+        # (use_content_xattn) ADDS a genuine sequence channel through a new cross-attention
+        # branch (see salm.a2s.content_adapter) without touching this pooled pathway at all
+        # -- both are active simultaneously when the flag is on.
+        content_kwargs = {}
+        if cfg.use_content_xattn:
+            from salm.a2s.content_adapter import content_encoder_hidden_states
+            from salm.data.frontend import AUDIOLDM_CLIP_SECONDS, load_waveform_mono_16k
+
+            # Oracle content source: the TARGET SPEECH's own mel, run through the frozen CTC
+            # probe's encoder. On the fly (no precompute) -- this is a falsification test,
+            # not a production path, and never available at real A2S inference time anyway.
+            with torch.no_grad():
+                wavs = [
+                    load_waveform_mono_16k(
+                        f, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left"
+                    )
+                    for f in batch["speech_file"]
+                ]
+                wav_t = torch.from_numpy(np.stack(wavs)).float().to(device)
+                target_mel = content_extractor.batch(wav_t)
+                content_seq = ctc_head.encode(target_mel)   # (B, 256, encoder_dim)
+            content_kwargs["encoder_hidden_states"] = content_encoder_hidden_states(content_seq)
+        else:
+            content_kwargs["encoder_hidden_states"] = None
+
         pred = unet(
             noisy,
             timesteps,
-            encoder_hidden_states=None,
             class_labels=cond,
+            **content_kwargs,
         ).sample
 
         if noise_scheduler.config.prediction_type == "epsilon":
@@ -566,23 +859,30 @@ def main() -> int:
         #   x_t = sqrt(abar) * x0 + sqrt(1-abar) * eps
         #   =>  x0_hat = (x_t - sqrt(1-abar) * eps_hat) / sqrt(abar)
         extras = {}
-        with torch.no_grad():
-            ac = noise_scheduler.alphas_cumprod.to(device=latents.device, dtype=torch.float32)
-            ab = ac[timesteps].view(-1, *([1] * (latents.dim() - 1)))
-            eps_hat = pred.float() if noise_scheduler.config.prediction_type == "epsilon" else None
-            if eps_hat is not None:
-                x0_hat = (noisy.float() - (1 - ab).sqrt() * eps_hat) / ab.sqrt().clamp(min=1e-8)
+        ac = noise_scheduler.alphas_cumprod.to(device=latents.device, dtype=torch.float32)
+        ab = ac[timesteps].view(-1, *([1] * (latents.dim() - 1)))
+        eps_hat = pred.float() if noise_scheduler.config.prediction_type == "epsilon" else None
+        if eps_hat is not None:
+            # NOT wrapped in torch.no_grad(): O-F (lambda_ctc > 0) needs x0_hat to carry
+            # gradient back through `pred` into the U-Net/conditioner. This changes nothing
+            # for validation, which already runs this whole function inside the caller's
+            # @torch.no_grad() decorator, and nothing for the plain diagnostic use below,
+            # whose own tensors are explicitly detached before being stored.
+            x0_hat = (noisy.float() - (1 - ab).sqrt() * eps_hat) / ab.sqrt().clamp(min=1e-8)
+            extras["x0_hat"] = x0_hat
+            extras["x0_hat_timesteps"] = timesteps
+            with torch.no_grad():
                 # Relative, so it is comparable across timesteps and across runs whose latent
                 # scale differs. Clamped because at t->T, x0_hat explodes and the raw number
                 # would be meaningless rather than informative.
                 # CAVEAT, measured: for a FIXED model error this metric GROWS with t (0.63 at
                 # t=125 rising to 1587 at t=875), because dividing by sqrt(abar) amplifies the
-                # error as abar -> 0. That is the exact mirror of eps-MSE's problem rather than a
-                # cure for it: averaged over random t, x0 error is dominated by high-noise
+                # error as abar -> 0. That is the exact mirror of eps-MSE's problem rather than
+                # a cure for it: averaged over random t, x0 error is dominated by high-noise
                 # samples just as eps-MSE is dominated by low-noise ones. Clamped so it cannot
                 # explode, but read it as a complementary view, NOT as a fixed loss. The metrics
                 # to actually trust here are val_clap_r1 (real chance baseline) and D1/D2.
-                num = (x0_hat - latents.float()).flatten(1).pow(2).sum(1)
+                num = (x0_hat.detach() - latents.float()).flatten(1).pow(2).sum(1)
                 den = latents.float().flatten(1).pow(2).sum(1).clamp(min=1e-8)
                 extras["x0_rel_mse"] = (num / den).clamp(max=1e4).mean()
         return loss, extras
@@ -623,6 +923,13 @@ def main() -> int:
         perm[order] = order.roll(-1)
 
         def eps(c):
+            # Deliberately encoder_hidden_states=None even when use_content_xattn is active:
+            # D1/D2 isolate sensitivity to the POOLED class_labels conditioning specifically
+            # (shuffled/null/zero variants), a different axis from Rank 2's content channel.
+            # Threading a real content sequence through here would need four content
+            # sequences too and muddy exactly what's being isolated -- out of scope for what
+            # this diagnostic answers. Known consequence: D1/D2 numbers do not reflect the
+            # content-xattn pathway's contribution when it is on.
             return unet(noisy, timesteps, encoder_hidden_states=None, class_labels=c).sample
 
         e_c = eps(cond)
@@ -707,7 +1014,9 @@ def main() -> int:
         diag_t = (buckets[0][0] + buckets[0][1]) // 2
 
         for batch in val_loader:
-            n = batch["speech"].shape[0]
+            # Batch size from the target, not the condition: "speech" is the S2A condition
+            # key and does not exist in an A2S batch, whereas every direction has a latent.
+            n = batch["latent_mean"].shape[0]
 
             # Compute the conditioning ONCE and reuse it for every metric below. The
             # frozen Whisper encoder dominates runtime, so recomputing it per metric made
@@ -875,11 +1184,16 @@ def main() -> int:
             f"selection would alternate between two different scales. Use val_clap_r1 or val_loss."
         )
     if cfg.select_metric.startswith("val_clap") and val_clap_dir is None:
+        fix = (
+            f"scripts/a2s/precompute_a2s_conditioning.py --split {cfg.val_split} "
+            "(and set align_target)"
+            if cfg.direction == "a2s"
+            else f"scripts/precompute_clap_targets.py --split {cfg.val_split}"
+        )
         raise SystemExit(
             f"select_metric='{cfg.select_metric}' needs CLAP targets for the '{cfg.val_split}' "
-            f"split, which are missing, so checkpoint_best would never be written. Precompute them "
-            f"(scripts/precompute_clap_targets.py --split {cfg.val_split}) or set "
-            f"select_metric: val_loss."
+            f"split, which are missing, so checkpoint_best would never be written. Precompute "
+            f"them ({fix}) or set select_metric: val_loss."
         )
 
     if cfg.resume_from:
@@ -958,17 +1272,24 @@ def main() -> int:
     # O2. Guarded so a config that asks for alignment but has no CLAP targets precomputed fails
     # loudly here instead of silently training the plain objective for hours and looking fine.
     lam_align = float(cfg.lambda_align)
+    if cfg.align_loss not in ("cosine", "infonce"):
+        raise SystemExit(f"align_loss must be 'cosine' or 'infonce', got {cfg.align_loss!r}")
     if lam_align > 0.0:
         if train_ds.clap_target is None:
-            raise SystemExit(
-                "lambda_align > 0 but the training set has no clap_target features. "
-                "Run scripts/precompute_clap_targets.py for the train split, or set "
-                "lambda_align: 0.0."
+            script = (
+                "scripts/a2s/precompute_a2s_conditioning.py"
+                if cfg.direction == "a2s"
+                else "scripts/precompute_clap_targets.py"
             )
-        log(f"O2 alignment loss ACTIVE: lambda={lam_align} on (1 - cos), "
-            f"warmup={cfg.align_warmup_steps} steps")
-        log(f"    scale reference: diffusion loss ~0.198, (1-cos) ~1.0 at init, so the "
-            f"alignment term starts ~{lam_align/0.198:.1f}x the diffusion term")
+            raise SystemExit(
+                "lambda_align > 0 but the training set has no alignment target. "
+                f"Run {script} for the train split, or set lambda_align: 0.0."
+            )
+        log(f"O2 alignment loss ACTIVE: lambda={lam_align} on {cfg.align_loss!r} "
+            f"(temp={cfg.align_temp} if infonce), warmup={cfg.align_warmup_steps} steps")
+        log(f"    scale reference: diffusion loss ~0.198, align term ~1.0 at init "
+            f"(cosine: 1-cos bounded [0,2]; infonce: cross-entropy / log(batch_size)), so "
+            f"the alignment term starts ~{lam_align/0.198:.1f}x the diffusion term")
     last_align, last_dm = None, None
 
     for epoch in range(start_epoch, cfg.epochs):
@@ -976,6 +1297,7 @@ def main() -> int:
             train_sampler.set_epoch(epoch)
 
         running, seen = 0.0, 0
+        ctc_running, ctc_seen = 0.0, 0   # true epoch mean, unlike train_align's last-batch snapshot
         t_epoch = time.time()
 
         for batch in train_loader:
@@ -987,16 +1309,84 @@ def main() -> int:
                     # would train the null embedding to encode that sample's scene, which
                     # corrupts both the unconditional branch and CFG at inference.
                     cond_raw = compute_condition(batch)
-                    loss_dm = diffusion_loss(batch, train=True, cond=cond_raw)
-                    tgt = F.normalize(batch["clap_target"].to(device).float(), dim=-1)
-                    # Both sides are unit vectors, so this is 1 - cosine, bounded [0, 2].
-                    align = (1.0 - (cond_raw.float() * tgt).sum(-1)).mean()
+                    # O-F needs x0_hat + the per-row timesteps diffusion_loss already drew,
+                    # so extras are requested here rather than via a second forward pass.
+                    if cfg.lambda_ctc > 0.0:
+                        loss_dm, dm_extras = diffusion_loss(
+                            batch, train=True, cond=cond_raw, return_extras=True
+                        )
+                    else:
+                        loss_dm, dm_extras = diffusion_loss(batch, train=True, cond=cond_raw), None
+                    tgt_raw = batch["clap_target"].to(device).float()
+                    if cfg.align_loss == "infonce":
+                        if cond_raw.shape[0] < 4:
+                            raise SystemExit(
+                                f"align_loss='infonce' needs a real batch of negatives; "
+                                f"got batch_size={cond_raw.shape[0]}. Raise batch_size or "
+                                f"use align_loss='cosine'."
+                            )
+                        align = infonce_loss(cond_raw, tgt_raw, temperature=cfg.align_temp)
+                    else:
+                        tgt = F.normalize(tgt_raw, dim=-1)
+                        # Both sides are unit vectors, so this is 1 - cosine, bounded [0, 2].
+                        align = (1.0 - (cond_raw.float() * tgt).sum(-1)).mean()
                     lam = lam_align
                     if cfg.align_warmup_steps > 0:
                         lam = lam_align * min(1.0, global_step / cfg.align_warmup_steps)
                     loss = loss_dm + lam * align
                     last_align = align.item()
                     last_dm = loss_dm.item()
+
+                    # ---- O-F: content loss on the decoded mel, additive to the O2 term
+                    # above. See TrainConfig.lambda_ctc for the full motivation. Only rows
+                    # whose ALREADY-DRAWN timestep (for the main diffusion loss -- no extra
+                    # U-Net forward pass) falls under ctc_max_t_frac get scored this step;
+                    # x0-hat is only a trustworthy clean-latent estimate at low noise.
+                    if cfg.lambda_ctc > 0.0 and dm_extras is not None:
+                        t_sel = dm_extras["x0_hat_timesteps"]
+                        low_thresh = int(
+                            cfg.ctc_max_t_frac * noise_scheduler.config.num_train_timesteps
+                        )
+                        low_idx = (t_sel < low_thresh).nonzero(as_tuple=True)[0].tolist()
+                        # ctc_encode can, in principle, return an empty list (a transcript that
+                        # normalizes to nothing under the fixed vocab) -- CTCLoss's targets must
+                        # NEVER contain the blank symbol, so a fake length-1 all-blank target
+                        # would be invalid input, not a harmless placeholder. Excluded here,
+                        # not padded around.
+                        ids_low = [ctc_encode(batch["speech_text"][i]) for i in low_idx]
+                        sel_idx = [i for i, ids in zip(low_idx, ids_low) if len(ids) > 0]
+                        ids_list = [
+                            torch.tensor(ids, dtype=torch.long) for ids in ids_low if len(ids) > 0
+                        ]
+                        if sel_idx:
+                            x0_sel = dm_extras["x0_hat"][sel_idx].float()
+                            mel_hat = vae.decode(
+                                x0_sel / train_ds.vae_scaling_factor
+                            ).sample.squeeze(1)                          # (Bsel, 1024, 64)
+                            ctc_log_probs = ctc_head(mel_hat)             # (Bsel, T_out, vocab)
+                            lp = ctc_log_probs.transpose(0, 1).float()    # (T_out, Bsel, vocab)
+
+                            target_lengths = torch.tensor(
+                                [len(ids) for ids in ids_list], dtype=torch.long
+                            )
+                            max_len = int(target_lengths.max().item())
+                            ids_padded = torch.zeros(
+                                len(ids_list), max_len, dtype=torch.long, device=device
+                            )
+                            for i, ids in enumerate(ids_list):
+                                ids_padded[i, : len(ids)] = ids
+                            # CTCLoss requires input_lengths/target_lengths on CPU even when
+                            # log_probs/targets are on GPU -- a well-known torch quirk, not
+                            # something to "optimize away" by moving them.
+                            input_lengths = torch.full(
+                                (lp.shape[1],), CTC_FRAMES_OUT, dtype=torch.long
+                            )
+                            ctc_loss_val = ctc_loss_fn(
+                                lp, ids_padded, input_lengths, target_lengths
+                            )
+                            loss = loss + cfg.lambda_ctc * ctc_loss_val
+                            ctc_running += ctc_loss_val.item()
+                            ctc_seen += 1
                 else:
                     loss = diffusion_loss(batch, train=True)
                     last_align, last_dm = None, loss.item()
@@ -1075,6 +1465,7 @@ def main() -> int:
                    if "val_clap_r1" in metrics else "")
                 + (f" x0={metrics['val_x0_rel_mse']:.4f}" if "val_x0_rel_mse" in metrics else "")
                 + (f" align={last_align:.4f}" if last_align is not None else "")
+                + (f" ctc={ctc_running/ctc_seen:.4f}({ctc_seen}b)" if ctc_seen else "")
                 + f" ({(time.time()-t_epoch)/60:.1f} min)")
             if "val_d1_gap" in metrics:
                 # The numbers that decide whether any of this is working. Both are relative
@@ -1140,6 +1531,13 @@ def main() -> int:
             # alignment term simply dominated the total.
             record["train_align"] = last_align
             record["train_diffusion"] = last_dm
+        if cfg.lambda_ctc > 0.0:
+            # A TRUE epoch mean (accumulated every qualifying step), unlike train_align's
+            # last-batch snapshot -- deliberately not repeating that known defect in new code.
+            # None (not 0.0) on an epoch where no batch happened to draw a low-t row, so a
+            # flat 0.0 in the curve isn't confused with "the term was never active".
+            record["train_ctc_loss"] = (ctc_running / ctc_seen) if ctc_seen else None
+            record["ctc_qualifying_batches"] = ctc_seen
         history.append(record)
         if is_main():
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))

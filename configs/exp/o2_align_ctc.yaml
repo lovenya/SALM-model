@@ -1,0 +1,19 @@
+# O-F: content loss on the DECODED mel, layered ON TOP of o2_align.yaml (which sets
+# lambda_align: 1.0). Additive, not a replacement -- O2 still steers which CLAP-text scene
+# vector to aim at; this separately supervises whether the DECODED content spells the right
+# words, sidestepping the CLAP-embedding ceiling the 2026-08-24 oracle-conditioning ablation
+# confirmed (perfect CLAP-text delivered directly to class_labels still produced
+# incomprehensible speech, by ear -- job 426005, see EXPERIMENT_LOG 2026-08-24b).
+#
+# Apply as EXTRA configs in this order: o2_align.yaml, then this file.
+#
+# REQUIRES a trained CTC probe checkpoint (scripts/a2s/train_ctc_probe.py). This path is the
+# deterministic default location for --run-name ctc_probe_v1 -- override with
+# --override ctc_checkpoint=<path> if a different probe run is used.
+
+lambda_ctc: 1.0
+ctc_checkpoint: /scratch/l/lovenya/salm_model_outputs/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt
+# Only rows whose (already-drawn) diffusion timestep falls under 25% of num_train_timesteps
+# get CTC-scored this step -- x0-hat is only a trustworthy clean-latent estimate at low
+# noise. See TrainConfig.ctc_max_t_frac.
+ctc_max_t_frac: 0.25

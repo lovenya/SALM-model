@@ -1,0 +1,27 @@
+# Rank 2 falsification test: does the U-Net learn to USE a real content sequence at all, via
+# a genuine cross-attention channel, given ENOUGH epochs to show a trend but FEW enough to
+# stay cheap? See salm/a2s/content_adapter.py for the mechanism and src/salm/train_ldm.py's
+# TrainConfig.use_content_xattn for the full motivation (AudioLDM 2's own lambda=1 for TTS
+# vs our pooled ~0 tok/s).
+#
+# Layer this ON TOP of o2_align.yaml -- content-xattn is additive to O2, exactly like O-F.
+# Apply as EXTRA configs in order: o2_align.yaml, then this file.
+#
+# ORACLE content source (the frozen CTC probe's encoder on the TARGET SPEECH's own mel --
+# never available at real A2S inference time). This is deliberate: the question here is
+# narrowly "CAN the U-Net use a real sequence at all", not "can we predict one at inference".
+# If this doesn't move val_clap_r1 or (once scored) the Rank-0 intelligibility metric within
+# these epochs, that is real information -- either the wiring needs fixing or a richer/
+# higher-rate content source is needed, not proof the whole direction is wrong.
+#
+# Short on purpose: O2 and InfoNCE both showed real movement within 2-10 epochs tonight: if
+# this mechanism works at all, it should show SOME signal in this budget too. Same
+# lr_total_steps as every other A2S run (still a valid curve position at epoch 12 of a
+# 100-epoch-equivalent schedule).
+
+use_content_xattn: true
+# Deterministic default location for --run-name ctc_probe_v1 -- override with
+# --override ctc_checkpoint=<path> if a different probe run is used.
+ctc_checkpoint: /scratch/l/lovenya/salm_model_outputs/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt
+epochs: 12
+lr_total_steps: 27400
