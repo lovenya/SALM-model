@@ -1,0 +1,7 @@
+# L0 for A2S -- masked mean-pool over the CLAP frames + one linear layer (~0.4M params).
+#
+# The cheap control. On S2A, L0 and L2 both sat at chance under the plain diffusion loss,
+# which is what established that the OBJECTIVE was the problem rather than conditioner
+# capacity. A2S should not inherit that conclusion; it should re-earn it, and this is the
+# rung that costs almost nothing to run.
+arch: a2s_audioldm_clapseq_mean_linear

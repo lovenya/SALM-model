@@ -1,0 +1,71 @@
+# Shared defaults for every A2S run (ambient audio -> speech).
+#
+# Layered the same way as S2A: base -> arch -> exp, merged left to right by train_ldm.py.
+#
+# WHAT DIFFERS FROM configs/base/s2a_audioldm.yaml, and why. Every one of these is a
+# consequence of reversing the direction; nothing here is a style change.
+#
+#  1. `direction: a2s` switches the trainer to the A2S dataset. The condition is precomputed
+#     CLAP frames rather than a waveform, so NO frozen encoder runs in the training loop.
+#     That is the single biggest difference in cost: S2A spent most of every step inside a
+#     635M Whisper forward, 84.6% of it on padding.
+#  2. `align_target: text`. O2 is the thing that made S2A work, and it needs an embedding of
+#     the TARGET. The A2S target is speech, and CLAP-audio is believed to be near-blind to
+#     speech content, so the alignment target is CLAP-TEXT of the transcript instead --
+#     which is also already 512-d and already in the space the U-Net's class_labels slot
+#     understands. The precompute script MEASURES both candidates; check the pairwise-spread
+#     numbers in the cond cache's meta.json before trusting this default.
+#  3. No `speech_seconds`. That knob padded the S2A conditioning waveform; A2S has no
+#     waveform in the loop. The 10.24 s canvas now applies to the *target*, and speech
+#     averages 4.86 s, so most of it is silence the model must learn to emit.
+#  4. `wandb_project: salm-a2s`, so the two directions do not share a run list.
+
+direction: a2s
+train_split: train
+val_split: val
+
+# The O2 alignment target: "text" (CLAP-text of the transcript) or "speech" (CLAP-audio of
+# the target speech). Decide from the measured pairwise spread, not from this default.
+align_target: text
+
+# Optimisation. 16 per GPU x 4 GPUs = effective 64 -> ~274 steps/epoch on 17,596 A2S train
+# rows (vs 234 on S2A's 15,033: the A2S manifest is the larger of the two).
+batch_size: 16
+# Lower than S2A's 8. There is no audio decode and no resample in an A2S step -- the dataset
+# is three memmap reads -- so the workers have almost nothing to do and more of them would
+# just add IPC. Raise only if the loader is measured to be the bottleneck.
+num_workers: 4
+
+# Same split as S2A: the U-Net is pretrained and the conditioner is not.
+lr_conditioner: 1.0e-4
+lr_unet: 1.0e-5
+weight_decay: 1.0e-2
+warmup_steps: 300
+grad_clip: 1.0
+
+cfg_dropout_prob: 0.1
+freeze_unet: false
+seed: 1337
+
+amp_dtype: bf16
+log_every: 25
+val_every_epochs: 1
+bucket_every_epochs: 5
+diag_every_epochs: 5
+
+# val_loss is known broken for this task -- on S2A it went UP across exactly the 100 epochs
+# in which the conditioner went from chance to 9x chance. val_clap_r1 has a real chance
+# baseline (1/batch_size).
+#
+# CAVEAT specific to A2S: with align_target: text, val_clap_r1 ranks the conditioner output
+# against CLAP-TEXT embeddings of transcripts. Under O2 that is partly the training
+# objective, exactly as it was for S2A -- fine for selection, not independent evidence.
+select_metric: val_clap_r1
+
+save_every_epochs: 20
+snapshot_fp16: true
+
+wandb_enabled: true
+wandb_project: salm-a2s
+wandb_entity: lovenya-org
+wandb_mode: offline

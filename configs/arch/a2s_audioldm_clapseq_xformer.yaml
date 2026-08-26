@@ -1,0 +1,17 @@
+# L2 for A2S -- 2-layer transformer over the CLAP frames + attention pooling.
+#
+# Deliberately the SAME conditioner as the S2A run that produced every result so far
+# (configs/arch/s2a_audioldm_whisper_xformer.yaml), so the two directions are comparable
+# rung for rung. Only the encoder differs: CLAP frames (32 x 768) in place of Whisper's
+# (<=1500 x 1280).
+#
+# `clapseq` means the CLAP features are read from the precomputed cache rather than encoded
+# in the loop. `clap` would run the tower live; same features, ~10x slower epochs.
+#
+# Parameter count differs from S2A's 32.28M only through in_proj (768 vs 1280 input width),
+# so this is ~31.8M -- close enough that a capacity argument cannot explain a gap between
+# the directions.
+arch: a2s_audioldm_clapseq_xformer
+cond_hidden_dim: 1024
+cond_layers: 2
+cond_dropout: 0.1

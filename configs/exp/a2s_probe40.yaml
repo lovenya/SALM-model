@@ -1,0 +1,14 @@
+# 40 epochs on the 100-epoch LR curve -- the first A2S read, deliberately short.
+#
+# Why 40 and not 100: on S2A, O2 reached its plateau within TEN epochs while the plain
+# objective sat at chance for all 100. So 40 epochs already separates "the conditioner
+# learns" from "it does not", which is the only question the first A2S cohort has to answer,
+# and it costs well under half the allocation.
+#
+# lr_total_steps stays at the a2s_long100 value on purpose. That is exactly what the knob is
+# for: a truncated run on a FIXED curve walks the same trajectory as a full one and differs
+# only in where it stopped, so a later 100-epoch run is directly comparable to this and can
+# even resume into it. Deriving the curve from epochs=40 instead would fully anneal by epoch
+# 40 and make the two incomparable.
+epochs: 40
+lr_total_steps: 27400

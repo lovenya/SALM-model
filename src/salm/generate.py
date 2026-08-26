@@ -10,6 +10,9 @@ Modes:
                   "someone is speaking", not what they said -- confirming that is a
                   result, and it is what motivates the conditioner.
   s2a    speech-> audio via a trained checkpoint (frozen encoder -> conditioner -> U-Net).
+  a2s    audio -> speech, the reverse direction. Same path, conditioned on the AMBIENT clip
+         through the frozen CLAP tower. A checkpoint trained on cached features ('clapseq')
+         has its arch remapped to the live tower here; see load_s2a_checkpoint.
                   The actual model.
 
 All three share the same sampler, so differences come only from the conditioning vector.
@@ -252,6 +255,12 @@ def load_s2a_checkpoint(checkpoint: Path, device: str):
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     cfg = payload["config"]
     arch = cfg.get("arch", "s2a_audioldm_whisper_xformer")
+    # A2S trains on PRECOMPUTED CLAP features ('clapseq'), whose encoder is a stand-in that
+    # refuses to encode. Generation has no cache to read from, so swap in the live CLAP tower.
+    # Same weights, same features -- see salm/encoders/precomputed.py.
+    if "clapseq" in arch:
+        arch = arch.replace("clapseq", "clap")
+        log(f"    arch remapped to {arch} (live CLAP tower for generation)")
     # Checkpoints written before the mapper->conditioner rename use the "mapper" key.
     cond_state = payload.get("conditioner") or payload["mapper"]
     output_dim = cond_state["null_embedding"].shape[0]
@@ -275,7 +284,8 @@ def load_s2a_checkpoint(checkpoint: Path, device: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", required=True, choices=["rung0", "rung1", "s2a", "b0"])
+    ap.add_argument("--mode", required=True,
+                    choices=["rung0", "rung1", "s2a", "a2s", "b0"])
     ap.add_argument("--checkpoint", default=None,
                     help="required for --mode s2a and --mode b0 (b0 needs the learned null)")
     ap.add_argument("--direction", default="s2a", choices=["s2a", "a2s"])
@@ -295,15 +305,34 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--copy-reference", action="store_true",
-                    help="also write the reference ambient audio, for A/B listening")
+                    help="also write the reference TARGET audio for A/B listening -- the "
+                         "ambient clip for s2a, the speech for a2s")
     ap.add_argument("--skip-unet-weights", action="store_true",
                     help="do NOT load the finetuned U-Net from the checkpoint; use the pretrained "
                          "AudioLDM U-Net instead. Isolates the conditioner's contribution, and "
                          "reproduces the behaviour of samples generated before 2026-08-12.")
+    # 2026-08-24: oracle-conditioning ablation (mode=a2s only). Bypasses the CONDITIONER
+    # entirely and feeds the true precomputed alignment embedding straight to class_labels,
+    # so generation happens with the target O2 was training toward, not the conditioner's
+    # attempt to reach it. Decomposes "the conditioner is bad at predicting the target" from
+    # "the target itself is a poor generation signal" -- the two have very different fixes,
+    # and confusing them would send the next round of work in the wrong direction.
+    ap.add_argument("--oracle-align", default="none", choices=["none", "text", "speech"],
+                    help="a2s only: skip the conditioner, feed the row's own "
+                         "align_text.npy/align_speech.npy vector as class_labels instead")
+    ap.add_argument("--cond-features-root", default=None,
+                    help="a2s only: root of the precomputed cond cache "
+                         "(default: OUTPUTS_ROOT/features_a2s_cond); needed to look up "
+                         "--oracle-align vectors and, for --mode a2s with a 'clapseq' "
+                         "checkpoint, has no other effect since generation always uses the "
+                         "live CLAP tower")
     args = ap.parse_args()
 
-    if args.mode in ("s2a", "b0") and not args.checkpoint:
+    if args.mode in ("s2a", "a2s", "b0") and not args.checkpoint:
         log(f"ERROR: --mode {args.mode} requires --checkpoint")
+        return 1
+    if args.oracle_align != "none" and args.mode != "a2s":
+        log(f"ERROR: --oracle-align is a2s-only, got --mode {args.mode}")
         return 1
 
     out_dir = Path(args.out_dir)
@@ -315,6 +344,42 @@ def main() -> int:
         rows = rows[: args.num_samples]
     log(f"{args.mode}: generating {len(rows)} samples from {args.direction}/{args.split}")
 
+    # Oracle vectors, keyed by sample_id rather than positionally: index.jsonl's row order
+    # can differ from load_manifest's if any rows were ever dropped by the latent precompute,
+    # so a positional match would silently pair the wrong oracle vector with the wrong row
+    # under --start-index/--num-samples slicing. sample_id is the one thing guaranteed
+    # stable across both.
+    oracle_by_id: dict[str, np.ndarray] | None = None
+    if args.oracle_align != "none":
+        cond_root = Path(
+            args.cond_features_root or (project_paths.OUTPUTS_ROOT / "features_a2s_cond")
+        )
+        cond_dir = cond_root / args.split
+        oracle_file = cond_dir / f"align_{args.oracle_align}.npy"
+        # features_a2s_cond has no index.jsonl of its own -- it was built row-aligned to the
+        # LATENTS' index.jsonl (scripts/precompute_latents.py --direction a2s), which is
+        # exactly the file to key by.
+        index_file = project_paths.FEATURES_ROOT / "a2s" / args.split / "index.jsonl"
+        if not oracle_file.exists() or not index_file.exists():
+            log(f"ERROR: --oracle-align {args.oracle_align} needs {oracle_file} and "
+                f"{index_file}. Run scripts/a2s/precompute_a2s_conditioning.py --split "
+                f"{args.split} first.")
+            return 1
+        oracle_arr = np.load(oracle_file)
+        ids = [json.loads(l)["sample_id"] for l in index_file.read_text().splitlines() if l]
+        if len(ids) != oracle_arr.shape[0]:
+            log(f"ERROR: {index_file} has {len(ids)} rows but {oracle_file} has "
+                f"{oracle_arr.shape[0]} -- caches out of sync, refusing to guess an alignment.")
+            return 1
+        oracle_by_id = {sid: oracle_arr[i] for i, sid in enumerate(ids)}
+        missing = [r.sample_id for r in rows if r.sample_id not in oracle_by_id]
+        if missing:
+            log(f"ERROR: {len(missing)} requested rows have no oracle vector "
+                f"(e.g. {missing[0]}) -- were they dropped by the latent precompute?")
+            return 1
+        log(f"    oracle conditioning ACTIVE: align_{args.oracle_align}, "
+            f"{len(oracle_by_id)} vectors from {oracle_file}")
+
     dtype = torch.float16 if args.device.startswith("cuda") else torch.float32
     log("Loading AudioLDM ...")
     pipe = load_pipeline(args.device, dtype)
@@ -325,7 +390,7 @@ def main() -> int:
     # b0 loads the same checkpoint as s2a: it needs the conditioner for its learned null
     # embedding, and it must use the SAME U-Net, because B0 is the floor for THIS model rather
     # than a generic unconditional sample.
-    if args.mode in ("s2a", "b0"):
+    if args.mode in ("s2a", "a2s", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
         checkpoint_epoch = payload.get("epoch")
@@ -360,6 +425,41 @@ def main() -> int:
         elif args.mode == "rung0":
             cond = clap_text_embeddings(pipe, [r.audio_cap for r in batch], args.device)
             negative = None
+        elif args.mode == "a2s" and oracle_by_id is not None:
+            # ORACLE ABLATION: skip the conditioner and the encoder entirely. class_labels
+            # gets the row's own precomputed target embedding -- the exact vector O2 was
+            # training the conditioner to reach -- so generation quality here reflects the
+            # TARGET and the U-Net alone, with conditioner error removed from the picture.
+            # Compared against the real a2s lane, this decomposes "conditioner underfits the
+            # target" from "the target itself is a weak generation signal": if oracle
+            # generations are ALSO not word-accurate, the target embedding (or the U-Net's
+            # ability to decode it) is the bottleneck, not the conditioner -- in which case
+            # improving the conditioner (better architecture, InfoNCE, more epochs) cannot
+            # help, and effort belongs on the target/interface instead.
+            oracle = np.stack([oracle_by_id[r.sample_id] for r in batch]).astype(np.float32)
+            cond = F.normalize(torch.from_numpy(oracle).to(args.device), dim=-1)
+            negative = conditioner.null_condition(len(batch), torch.device(args.device))
+        elif args.mode == "a2s":
+            # The mirror of the s2a branch: condition on the AMBIENT clip and let the U-Net
+            # generate speech. Fixed 10.24 s canvas with centre alignment, matching exactly
+            # what scripts/a2s/precompute_a2s_conditioning.py fed the encoder at train time --
+            # a different crop here would put the condition out of distribution.
+            wavs = [
+                load_waveform_mono_16k(
+                    str(r.audio_path), target_seconds=AUDIOLDM_CLIP_SECONDS
+                )
+                for r in batch
+            ]
+            lengths = [w.shape[0] for w in wavs]
+            with torch.no_grad():
+                feats, mask = encoder.encode_with_mask(
+                    torch.from_numpy(np.stack(wavs)).to(args.device),
+                    torch.tensor(lengths),
+                )
+                cond = conditioner(feats, mask=mask)
+                negative = conditioner.null_condition(
+                    len(batch), torch.device(args.device)
+                )
         else:
             wavs = [load_waveform_mono_16k(str(r.speech_path)) for r in batch]
             if args.degrade != "none":
@@ -404,10 +504,17 @@ def main() -> int:
             gen_path = out_dir / "audio" / f"{row.sample_id}.wav"
             sf.write(gen_path, audio, AUDIOLDM_SR)
 
+            # The reference is whatever this direction is trying to GENERATE: ambience for
+            # S2A, speech for A2S. Getting this backwards would score every A2S clip against
+            # its own input.
+            is_a2s = args.direction == "a2s"
+            ref_source = row.speech_path if is_a2s else row.audio_path
             ref_path = None
             if args.copy_reference:
                 ref = load_waveform_mono_16k(
-                    str(row.audio_path), target_seconds=AUDIOLDM_CLIP_SECONDS
+                    str(ref_source),
+                    target_seconds=AUDIOLDM_CLIP_SECONDS,
+                    align="left" if is_a2s else "center",
                 )
                 ref_path = out_dir / "audio" / f"{row.sample_id}__reference.wav"
                 sf.write(ref_path, ref, AUDIOLDM_SR)
@@ -422,7 +529,10 @@ def main() -> int:
                     # portable form is authoritative and the absolute one is a convenience.
                     "generated_file_rel": str(gen_path.relative_to(out_dir)),
                     "generated_file": str(gen_path),
-                    "reference_audio_file": str(row.audio_path),
+                    # Named for the S2A case, but it always means "the target". The metric
+                    # suite maps this to source.audio_file.
+                    "reference_audio_file": str(ref_source),
+                    "condition_file": str(row.audio_path if is_a2s else row.speech_path),
                     "reference_copy": str(ref_path) if ref_path else None,
                     "speech_file": str(row.speech_path),
                     "audio_cap": row.audio_cap,
@@ -456,6 +566,10 @@ def main() -> int:
         "checkpoint_epoch": checkpoint_epoch,
         "unet_weights_loaded": unet_weights_loaded,
         "skip_unet_weights": bool(args.skip_unet_weights),
+        # "none" = the real conditioner's own output was used; anything else means the
+        # CONDITIONER was bypassed and the row's precomputed target embedding was fed to
+        # class_labels directly -- see --oracle-align's help text for what that isolates.
+        "oracle_align": args.oracle_align,
         "rms_mean": float(np.mean(rms)) if rms else 0.0,
         "rms_min": float(np.min(rms)) if rms else 0.0,
         "near_silent_count": int(sum(1 for r in rms if r < 1e-4)),

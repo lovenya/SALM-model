@@ -1,0 +1,14 @@
+# 100 epochs for A2S.
+#
+# lr_total_steps pins the cosine curve to 27,400 steps = 100 epochs x 274 steps/epoch
+# (17,596 A2S train rows / 4 GPUs / batch 16, drop_last). It is the A2S counterpart of
+# exp/long100.yaml's 23,400 and must NOT be reused across directions -- the row counts
+# differ (17,596 vs 15,033), so sharing the number would leave one direction annealed to a
+# different point at the same epoch and make the two incomparable.
+#
+# If the precompute drops rows, check the `steps/epoch` line the trainer prints at startup
+# and update this. A few dropped rows will not move 274; hundreds would.
+#
+# Comparison rule, unchanged: only compare runs that share `epochs` AND `lr_total_steps`.
+epochs: 100
+lr_total_steps: 27400

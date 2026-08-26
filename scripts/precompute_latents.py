@@ -1,5 +1,9 @@
 """
-Precompute AudioLDM VAE latents for the ambient (target) audio of a split.
+Precompute AudioLDM VAE latents for the TARGET clip of a split.
+
+Which file is the target depends on direction, hence `--target`:
+    s2a  --target audio   the ambient clip   (the default; every S2A run used this)
+    a2s  --target speech  the utterance      (A2S generates speech)
 
 Why precompute: mel extraction and VAE encoding are the two steps most likely to be
 subtly wrong, and they are deterministic. Running them once means (a) a mistake shows
@@ -19,6 +23,7 @@ Outputs, under <out-dir>/<direction>/<split>/:
 
 Usage:
     python scripts/precompute_latents.py --direction s2a --split train
+    python scripts/precompute_latents.py --direction a2s --split train --target speech
 """
 
 from __future__ import annotations
@@ -54,7 +59,11 @@ def log(msg: str) -> None:
 
 
 def load_rows_prefetched(
-    rows: list, num_workers: int, prefetch: int
+    rows: list,
+    num_workers: int,
+    prefetch: int,
+    target_attr: str = "audio_path",
+    align: str = "center",
 ) -> Iterator[tuple[int, object, np.ndarray | None, str | None]]:
     """
     Yield (row_index, row, waveform, error) in manifest order, loading ahead in threads.
@@ -72,7 +81,9 @@ def load_rows_prefetched(
         row_i, row = item
         try:
             wav = load_waveform_mono_16k(
-                str(row.audio_path), target_seconds=AUDIOLDM_CLIP_SECONDS
+                str(getattr(row, target_attr)),
+                target_seconds=AUDIOLDM_CLIP_SECONDS,
+                align=align,
             )
         except Exception as exc:
             return row_i, row, None, f"read_error: {exc}"
@@ -103,6 +114,13 @@ def load_rows_prefetched(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--direction", default="s2a", choices=["s2a", "a2s"])
+    ap.add_argument(
+        "--target",
+        default=None,
+        choices=["audio", "speech"],
+        help="which file to encode as the generation target. Default: audio for s2a, "
+             "speech for a2s -- i.e. whatever that direction generates.",
+    )
     ap.add_argument("--split", default="train", choices=["train", "val", "test"])
     ap.add_argument("--out-dir", default=str(project_paths.FEATURES_ROOT))
     ap.add_argument("--batch-size", type=int, default=16)
@@ -123,6 +141,15 @@ def main() -> int:
                     help="max clips held in flight (bounds memory)")
     args = ap.parse_args()
 
+    # Default the target from the direction rather than requiring the flag: passing
+    # --direction a2s and silently encoding ambient latents would produce a cache that looks
+    # right, trains without error, and teaches the model to generate the wrong modality.
+    target = args.target or ("speech" if args.direction == "a2s" else "audio")
+    target_attr = "speech_path" if target == "speech" else "audio_path"
+    # Speech is left-aligned: its transcript is the supervision, so an over-long utterance
+    # must keep its start. Ambient targets nearly fill the canvas, so centre is fine there.
+    align = "left" if target == "speech" else "center"
+
     out_dir = Path(args.out_dir) / args.direction / args.split
     if out_dir.exists() and any(out_dir.iterdir()) and not args.overwrite:
         log(f"ERROR: {out_dir} already populated. Pass --overwrite to replace.")
@@ -133,6 +160,7 @@ def main() -> int:
     if args.limit:
         rows = rows[: args.limit]
     log(f"{args.direction}/{args.split}: {len(rows)} manifest rows")
+    log(f"    target = {target} ({target_attr}), crop align = {align}")
 
     # ------------------------------------------------------------------ models
     log("Loading AudioLDM VAE ...")
@@ -152,7 +180,9 @@ def main() -> int:
 
     # ------------------------------------------- discover latent shape once
     probe_wav = load_waveform_mono_16k(
-        str(rows[0].audio_path), target_seconds=AUDIOLDM_CLIP_SECONDS
+        str(getattr(rows[0], target_attr)),
+        target_seconds=AUDIOLDM_CLIP_SECONDS,
+        align=align,
     )
     with torch.no_grad():
         probe_mel = extractor(probe_wav).unsqueeze(0).unsqueeze(0)
@@ -192,7 +222,11 @@ def main() -> int:
             written += 1
 
     for row_i, row, wav, error in load_rows_prefetched(
-        rows, num_workers=args.load_workers, prefetch=args.load_prefetch
+        rows,
+        num_workers=args.load_workers,
+        prefetch=args.load_prefetch,
+        target_attr=target_attr,
+        align=align,
     ):
         # Unreadable or degenerate rows are dropped, not fatal -- one bad file should not
         # discard a 20-minute pass.
@@ -245,6 +279,11 @@ def main() -> int:
     meta = {
         "direction": args.direction,
         "split": args.split,
+        # Recorded so the cache is self-describing: a2s latents built from the ambient clip
+        # by mistake are byte-plausible and would train silently. Consumers should check it.
+        "target": target,
+        "target_field": target_attr,
+        "crop_align": align,
         "manifest_rows": len(rows),
         "kept": written,
         "dropped": len(dropped),

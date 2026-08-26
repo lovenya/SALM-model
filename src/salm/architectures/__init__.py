@@ -37,6 +37,38 @@ def _build_whisper_encoder(cfg: dict, device: torch.device):
     )
 
 
+def _build_clap_encoder(cfg: dict, device: torch.device):
+    """A2S: frozen CLAP audio tower over the ambient input, as a frame sequence."""
+    from salm.encoders.clap_encoder import ClapAudioSequenceEncoder
+    from configs import paths as project_paths
+
+    return ClapAudioSequenceEncoder(
+        cfg.get("clap_model_id", project_paths.CLAP_MODEL_ID),
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _build_precomputed_encoder(cfg: dict, device: torch.device):
+    """
+    No encoder at all -- features come from disk. Used by the A2S runs.
+
+    `cond_feature_dim` is injected by the trainer from the feature cache's meta.json, so the
+    conditioner is always built to the width that is actually on disk rather than to a
+    constant that could drift away from it.
+    """
+    from salm.encoders.precomputed import PrecomputedSequenceEncoder
+
+    dim = cfg.get("cond_feature_dim", 0)
+    if not dim:
+        raise ValueError(
+            "the 'clapseq' encoder reads precomputed features, so cond_feature_dim must be "
+            "set from the feature cache's meta.json. The trainer injects it; if you are "
+            "building this architecture directly, pass it in cfg."
+        )
+    return PrecomputedSequenceEncoder(dim, source=cfg.get("cond_features_dir", "disk"))
+
+
 def _build_qwen_encoder(cfg: dict, device: torch.device):
     raise NotImplementedError(
         "Qwen2.5-Omni encoder (ladder rung L4) is not wired yet. Weights are local at "
@@ -47,7 +79,9 @@ def _build_qwen_encoder(cfg: dict, device: torch.device):
 
 
 ENCODERS: dict[str, Callable] = {
-    "whisper": _build_whisper_encoder,
+    "whisper": _build_whisper_encoder,      # S2A: speech in
+    "clap": _build_clap_encoder,            # A2S: ambience in, encoded in the loop
+    "clapseq": _build_precomputed_encoder,  # A2S: the same features, read from cache
     "qwen_omni": _build_qwen_encoder,
 }
 

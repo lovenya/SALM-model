@@ -62,7 +62,9 @@ class MelConfig:
     norm_mode: str = "none"
 
 
-def load_waveform_mono_16k(path: str, target_seconds: float | None = None) -> np.ndarray:
+def load_waveform_mono_16k(
+    path: str, target_seconds: float | None = None, align: str = "center"
+) -> np.ndarray:
     """
     Load a wav as mono float32 at 16 kHz.
 
@@ -70,9 +72,18 @@ def load_waveform_mono_16k(path: str, target_seconds: float | None = None) -> np
     `speech_file` is always mono (see CONTEXT.md audit), so downmixing is mandatory
     rather than defensive.
 
-    If `target_seconds` is given, the waveform is center-cropped or zero-padded to
-    exactly that length.
+    If `target_seconds` is given, the waveform is cropped or zero-padded to exactly that
+    length. `align` controls only the CROP side, since padding is always on the right:
+
+      "center" -- the S2A default. Ambient targets are already ~10 s against a 10.24 s
+                  canvas, so which end is trimmed barely matters.
+      "left"   -- required for A2S speech. Speech averages 4.86 s and its transcript is
+                  the supervision, so trimming from the middle of an over-long utterance
+                  would leave audio whose start does not correspond to the start of
+                  `speech_text`.
     """
+    if align not in ("center", "left"):
+        raise ValueError(f"align must be 'center' or 'left', got {align!r}")
     wav, sr = sf.read(path, dtype="float32", always_2d=True)
 
     # (frames, channels) -> mono
@@ -82,18 +93,18 @@ def load_waveform_mono_16k(path: str, target_seconds: float | None = None) -> np
         wav = librosa.resample(wav, orig_sr=sr, target_sr=AUDIOLDM_SR, res_type="soxr_hq")
 
     if target_seconds is not None:
-        wav = _fix_length(wav, int(round(target_seconds * AUDIOLDM_SR)))
+        wav = _fix_length(wav, int(round(target_seconds * AUDIOLDM_SR)), align=align)
 
     return wav.astype(np.float32, copy=False)
 
 
-def _fix_length(wav: np.ndarray, target_len: int) -> np.ndarray:
-    """Center-crop or right-pad with zeros to `target_len` samples."""
+def _fix_length(wav: np.ndarray, target_len: int, align: str = "center") -> np.ndarray:
+    """Crop (centered or from the left) or right-pad with zeros to `target_len` samples."""
     n = wav.shape[0]
     if n == target_len:
         return wav
     if n > target_len:
-        start = (n - target_len) // 2
+        start = 0 if align == "left" else (n - target_len) // 2
         return wav[start : start + target_len]
     return np.pad(wav, (0, target_len - n), mode="constant")
 
