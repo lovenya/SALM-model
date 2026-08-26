@@ -18,6 +18,8 @@ Update it via the `/update-docs` skill after every meaningful milestone.
 - `docs/ARCHITECTURE_MENU.md` — the options for what to try next, tiered so every added component
   is licensed by a measured gap against something simpler. Carries the research evidence.
 - `docs/wandb_setup.md` — W&B on this cluster (offline mode, sync workflow, the entity trap).
+- `docs/LEARNINGS.md` — portable technical lessons (gotchas, mechanisms, fixes) worth
+  remembering independent of this project — interview-ready, not project narrative.
 - `CLAUDE.md` — hard rules, chiefly: **never touch Slurm jobs without explicit instruction.**
 
 ## What this repo is

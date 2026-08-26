@@ -1164,3 +1164,539 @@ than believed:
 `salm_e2e` registration in `configs/model_capabilities.json`, which the user approved, and which is
 still left uncommitted for them to stage.
 
+
+## 2026-08-23: A2S — the reverse direction, built. Nothing measured yet.
+
+Scope change, user's call: A2S becomes the active phase. Same architecture, fresh weights, its own
+model; merging weights / joint training / a direction conditioner are explicitly later. Recorded
+here because three of the design decisions are the kind that look arbitrary in six weeks.
+
+### The encoder choice follows one rule, and CLAP passes it for the same reason it failed S2A
+
+S2A used Whisper because that direction needs *what was said*, and this repo kept CLAP-audio-on-
+speech as a deliberate **control** on the grounds that CLAP reports only that speech is happening.
+A2S needs *what the scene is*, which is exactly what CLAP's audio↔caption objective encodes. So the
+property that disqualified CLAP for S2A is what qualifies it here — same rule, opposite outcome.
+
+Three practical consequences, all checked rather than assumed: `laion/clap-htsat-unfused` is already
+in the local HF cache (compute nodes have no internet); `precompute_clap_targets.py` already embeds
+`audio_file`, so what were S2A's *targets* are A2S's *inputs*; and `encoders/base.py` names this exact
+swap as the reason `FrozenEncoder` exists. **BEATs is not local** and would need a login-node
+download — that is the blocker if we ever want it.
+
+### CLAP can emit a real time sequence, which is what keeps the ladder intact
+
+`get_audio_features` returns one pooled 512-d vector, which would have collapsed the conditioner
+ladder to a 512→512 MLP and made the A2S runs incomparable to the S2A ones rung for rung.
+`ClapAudioModel.last_hidden_state` is the pre-pooling tensor instead: **(B, 768, 2, 32)** for this
+config, so averaging the frequency axis gives (B, 32, 768) — 32 frames over 10 s, 0.31 s each. The
+whole ladder (mean_linear / attn_mlp / xformer / qformer) then works unchanged; L2 comes out at
+31.76M params against S2A's 32.28M, differing only through `in_proj`'s input width, so no capacity
+argument can explain a gap between the directions.
+
+**The time axis really is time-ordered**, which is not obvious and would be silently wrong if
+assumed. HTSAT folds a long mel into a square image by stacking `freq_ratio` consecutive TIME chunks
+along the frequency axis, and the group-2D reshape at the end of `ClapAudioEncoder.forward` undoes
+exactly that: the `F/c` groups are the consecutive chunks and `T` is the position within one. Read
+out of the installed transformers source, not inferred.
+
+### O2's alignment target had to change, and the obvious mirror is the wrong answer
+
+O2 is the single thing that made S2A work, and it pulls the conditioner toward an embedding of the
+**target**. The direct mirror — CLAP-audio of the target speech — is expected to be useless for the
+same reason CLAP-audio-on-speech was a control. So the target is **CLAP-text of the transcript**,
+which also happens to resolve a tension flagged the same morning: it is already 512-d and already in
+the CLAP space the pretrained U-Net's `class_labels` slot understands, whereas a pooled-Whisper
+target would have pushed the conditioner *out* of that space.
+
+Rather than settle this by argument, **both candidates are computed and their pairwise cosine spread
+reported** (the same statistic that reads 0.291 for S2A's ambient targets). Near 1.0 means collinear
+and therefore useless as an alignment target. If `align_speech` collapses, that is the first direct
+measurement of an assumption this repo has relied on since 2026-08-06.
+
+### Two things that do NOT carry over from S2A, and one that had to be fixed
+
+- **The decoder is now the risk, not the conditioner.** 64 mel bins (speech vocoders use 80) and a
+  VAE/vocoder trained on general audio. `scripts/a2s/check_speech_stack.py` gates on it and is scored
+  as **WER against `speech_text`** with the untouched clip as the floor — a real quantity, unlike the
+  S2A gate's mel correlation, which could not have told us whether *words* survived.
+- **Length.** Speech averages 4.86 s in a 10.24 s canvas, so most of the target is silence the model
+  must learn to emit, and the tail past 10.24 s is cropped. Cropping is now **left**-aligned for
+  speech (`frontend._fix_length(align=...)`): the old centre crop would have left audio whose start
+  no longer corresponded to the start of its own transcript, i.e. corrupted supervision.
+- **Precomputing the condition inverts the S2A trade.** S2A kept raw speech in the loop to leave the
+  encoder and its pooling swappable. CLAP's sequence is small enough to cache (~0.9 GB/split) and the
+  conditioner still owns the pooling, so only the encoder *choice* is baked in — and an A2S step then
+  contains no frozen forward pass and no CPU-bound decode at all.
+
+### Four bugs the offline validation caught before any allocation was spent
+
+Worth listing because all four would have failed at job startup or, worse, trained quietly:
+
+1. `val_clap_dir` was bound only inside the S2A branch, so the `select_metric` guard would have
+   raised `NameError` on every A2S run.
+2. `train_ds.clap_target` is read by the O2 guard; the A2S dataset called it `align_target`.
+   Fixed by aliasing, so the guard needs no direction branch.
+3. `generate.py` gated checkpoint loading on `mode in ("s2a", "b0")`, so `--mode a2s` would have
+   sampled from an unconditioned pipeline with no conditioner at all.
+4. `n = batch["speech"].shape[0]` in the validation loop — "speech" is the S2A *condition* key and
+   does not exist in an A2S batch. Now taken from the target latent, which every direction has.
+
+Also caught by reading rather than running: CLAP's feature extractor defaults to `rand_trunc`, a
+**random** crop once the waveform exceeds 10 s. Our 10.24 s clips do exceed it, so a "frozen" encoder
+would have been nondeterministic and the cache would not have matched a re-run. The encoder now caps
+the waveform explicitly.
+
+## 2026-08-24: A0/A1 completed — O2 rescues A2S too, but the target is content-poor. First listen: "sounds like speech, incomprehensible."
+
+### The two probes, finished
+
+| | A0 (plain) | A1 (+O2, CLAP-text, λ=1.0) |
+|---|---|---|
+| final r1 (40/40 ep) | 0.061 vs chance 0.0625 — flat the whole run | 0.327 vs chance 0.0625 — **5.2×** |
+| best r1 anywhere | 0.065 | 0.354 at **epoch 6**, then drifted down |
+| val_clap_cos | ~0.01 | peaked 0.58 @ep5, ended 0.47 — **falling since epoch 5** |
+| train-side cosine (last-batch, noisy) | — | climbed to ~0.95 and still rising |
+
+Reproduces the S2A finding in reverse: the plain diffusion objective alone teaches the
+conditioner nothing (A0, exactly like S2A's L0/L2), and O2 rescues it (A1). But A1's
+signature is NOT S2A's clean one — r1 peaked at epoch 6 and *declined* over the remaining
+33 epochs while train cosine kept climbing, a widening train/val gap consistent with
+"the target is only partly predictable from the input," not "the model needs more epochs."
+
+### First listen (user, by ear, on copied audio): "sounds like speech but incomprehensible,
+### like a foreign language"
+
+This is the single most informative data point of the session, and it matches the theory
+precisely — a distinctive failure signature, not a generic bad result:
+
+- **Register/prosody survives** ("sounds like speech") — consistent with CLAP-text
+  carrying coarse utterance-level content (topic, energy, register).
+- **Words do not** ("incomprehensible... foreign language") — consistent with CLAP's text
+  tower being trained on caption-style sentences ("a dog barking"), never on preserving
+  fine-grained word-by-word distinctions the way an ASR model would. We feed it the REAL
+  verbatim transcript (`speech_text`) — the mismatch is not the text source, it's what the
+  encoder that reads it was ever trained to preserve.
+- **This is not a decoder failure.** The 2026-08-23 gate already measured essentially zero
+  WER degradation through the real VAE→vocoder path on real target speech
+  (`wer_degradation_vae = -0.0063`). The pipeline can render real words when given a
+  latent that encodes them; A1's output not doing so points at the CONDITION, not the
+  decoder.
+
+### The metric-space check that mattered: val_clap_r1/cos are in CLAP-TEXT space, not
+### CLAP-audio space
+
+Verified directly against `train_ldm.py`: `batch["clap_target"]` is whatever
+`align_target` points at (`text` for both A0/A1), so these metrics are NOT capped by
+CLAP-audio's 0.762 near-collapse — that concern, raised by an external analysis pass (see
+below), does not apply to our actual configuration.
+
+### `train_loss` vs `val_loss` are DIFFERENT FORMULAS whenever O2 is active — user caught
+### this by inspection, confirmed against code
+
+- `diffusion_loss()` returns pure MSE, nothing else, in every call site including
+  validation (`return F.mse_loss(...)`, verified — no align term is ever added on the val
+  side).
+- The *training* loop's `loss = loss_dm + lam * align` when O2 is on, and `train_loss` (a
+  true epoch mean, `running += loss.item()`) is a mean of THAT combined quantity.
+- So `train_loss` and `val_loss` are apples-to-oranges whenever `lambda_align > 0`, and
+  their divergence is partly an artifact of comparing different formulas, not evidence by
+  itself. **Separate finding, exposed while checking this**: `train_align`/`train_diffusion`
+  (the two sub-terms, used for the earlier train-vs-val cosine comparison in this log) are
+  NOT epoch means — `last_align = align.item()` is overwritten every batch and only the
+  final batch's value survives to be logged. Already flagged as an unfixed defect before
+  tonight; now has a concrete motivating case (any train/val cosine comparison is noisier
+  than it should be until this is an accumulated mean like `val_loss` already is).
+
+**Confirmed nothing is tuned on val_loss.** Both A0 and A1's saved configs show
+`select_metric: val_clap_r1`; `checkpoint_best` never uses val_loss. The LR schedule is a
+fixed step-count cosine curve (`build_lr_lambda`), never reactive to any validation number.
+val_loss is purely displayed.
+
+### The ridge-probe finding: a linear model beats the trained conditioner on retrieval
+
+Closed-form ridge regression, mean-pooled (32-frame-averaged) ambient CLAP features (768-d,
+train split) → CLAP-text-of-transcript (512-d), evaluated on val, no training loop:
+
+```
+R@1 (batch-16, chance 0.0625):      0.45-0.46   -> ~7.3x chance
+R@1 (full val, chance 0.00045):     0.022-0.024  -> ~50x chance
+```
+
+That R@1@16 is HIGHER than A1's trained 32M-param conditioner ever reached (0.354 peak),
+using strictly LESS input information (a mean, not the full sequence) and a trivial convex
+objective. Two consequences: (1) real, linearly-decodable signal about the transcript
+embedding genuinely exists in the ambient input — this is not a hopeless task; (2) the
+current O2 recipe (plain per-example cosine) is leaving that signal on the table, most
+likely because cosine-to-own-target has no repulsion term and cannot penalize every row's
+output drifting toward a shared centroid while the loss keeps falling.
+
+Also measured: mean cos(centroid, target) = 0.495 > mean cos(ridge prediction, target) =
+0.31-0.34 for every alpha tried. The centroid trivially wins on raw cosine (a fixed
+near-mean vector shares "aboutness" with any target) while losing badly on retrieval —
+which is itself evidence for why R@1, not raw cosine, is the metric to trust here.
+
+### External design-options report (spawned as an opus/Plan agent, read no repo files,
+### reasoned from a written brief only)
+
+Full report available on request; headline structure, since it reframed the question
+usefully:
+
+- **Three axes for any O2 target, not two**: is it discriminative (measured, pairwise
+  spread), is it readable by the U-Net's `class_embedding` (the "address"), and is it
+  PREDICTABLE from the input at all (the "realizability" axis — never measured before
+  tonight, and the ridge probe above is the first real measurement of it for A2S).
+- **The span argument against a naive Whisper-as-O2-target swap**: any projection into the
+  512-d CLAP space the U-Net understands necessarily discards whatever content doesn't
+  already fit CLAP's geometry — you cannot get Whisper's content and CLAP's address out of
+  the same 512 numbers without the U-Net relearning what that slot means, which 17.6k rows
+  at a deliberately low U-Net LR cannot afford.
+- **The user's "decode with the VAE" instinct**, properly placed: not the VAE (which never
+  sees the conditioning vector, only the latent) but one hop downstream — supervise the
+  DECODED mel with a content loss (a small frozen CTC head on `x0-hat`, decoded via the VAE
+  only, no vocoder needed) rather than substituting the alignment target. Named **O-F** in
+  the report; the honest home for the original idea.
+- **Cross-attention is a bandwidth fix, not a content fix, for A2S specifically**: the
+  condition sequence would be built from the AMBIENT input, which never contained the
+  words either. It would help S2A (input = speech, which does carry the words) in a way it
+  structurally cannot help A2S.
+- Ranked recommendation: InfoNCE loss (**O-C**) first (cheapest, directly falsifiable
+  against A1's numbers), then an oracle-conditioning ablation (**P2**) to separate
+  conditioner error from target-quality ceiling.
+
+### Built tonight, validated offline, not yet run
+
+1. **InfoNCE O2 loss** (`train_ldm.infonce_loss`, `align_loss: cosine|infonce` config
+   field, default `cosine` so every existing config/checkpoint is bit-identical).
+   Verified numerically before use: random init ≈1.0 (comparable scale to the cosine term),
+   perfect match ≈0, and — the property that actually motivates this — a
+   CENTROID-COLLAPSED prediction scores 1.04 under InfoNCE (still near-random) but only
+   0.74 under plain cosine (looks like real progress). That gap is the exact failure mode
+   this is meant to close. Config: `configs/exp/o2_align_infonce.yaml`, an overlay on top
+   of `o2_align.yaml`.
+2. **Oracle-conditioning ablation** (`generate.py --oracle-align {text,speech}`): bypasses
+   the conditioner, feeds the row's own precomputed alignment vector straight to
+   `class_labels`. Looked up by `sample_id`, not position, so it survives
+   `--start-index`/`--num-samples` slicing — verified against the real val cache (16 rows,
+   0 missing; also checked a `[100:108]` slice, 0 missing). Decomposes "conditioner can't
+   reach the target" from "the target itself is a poor generation signal" — directly
+   answers the question the first listen just raised.
+   `submission_scripts/run_tamia_a2s_oracle_ablation.sbatch`, defaults to A1's
+   `checkpoint_best.pt` (the only A2S checkpoint trained with an alignment target at all).
+
+Neither has been submitted — both need the user to run `sbatch`, per standing policy.
+
+**Pre-registered prediction for the oracle ablation**, written before the number exists:
+given the first listen already reports "foreign language" content failure, and the
+CLAP-text-was-trained-on-captions argument, the oracle lane will ALSO sound
+content-incomprehensible, even though it removes 100% of conditioner error. If that holds,
+the ceiling is the target/interface, not the conditioner, and effort should go to O-F or a
+cascade — not more architecture/loss tuning on the conditioner.
+
+## 2026-08-24b: the oracle test confirms it — CLAP-text is the ceiling, not the conditioner
+
+**Both `real_conditioner` and `oracle_text` (job 426005) sound the same to the ear: "incomprehensible
+foreign-language-like speech."** The oracle lane feeds the row's TRUE CLAP-text embedding straight to
+`class_labels`, bypassing the trained conditioner entirely — so this removes 100% of conditioner error
+from the picture, and the failure persists identically.
+
+This resolves the fork this whole investigation was built to test: **the bottleneck is the target/
+interface (CLAP-text's resolution on word content), not the conditioner's ability to reach it.** No
+amount of further conditioner tuning under the current recipe — more epochs, a better loss, a bigger
+architecture — can produce comprehensible words, because the perfect version of the current target
+already fails to. This was the exact, pre-registered prediction from earlier tonight, and it held.
+
+**Consequence for InfoNCE (job 426004, running).** InfoNCE is still a real, measured win on the metric
+it targets — 0.424 (its worst epoch so far) already beats A1's 0.354 (its best) — but that metric is
+retrieval accuracy in CLAP-text space, and the oracle result means CLAP-text space itself is not rich
+enough to determine words. InfoNCE's result stays valuable for a paper table (retrieval IS a real,
+reportable number) but should not be read as progress toward comprehensible A2S output. Letting it
+finish is still worthwhile for that table; it is no longer expected to be the path forward.
+
+**Where this points next.** Of the report's options, the two live candidates are now clearly ahead of
+the rest: **O-F** (mel-space CTC content loss on the decoded x0-hat, sidestepping the CLAP-space
+bottleneck by supervising the generation path directly rather than any embedding target) and **O-J**
+(a two-stage cascade with a real text-conditioned speech stage). O-F is the smaller build and keeps the
+single-backbone S2A/A2S narrative intact; O-J is the more decisive fix if O-F still caps out, at the
+cost of that narrative. Recommend O-F first.
+
+### Methodology note: run-to-run resource fairness deliberately relaxed for the exploratory phase
+
+User's call, 2026-08-24: from here on, later runs may use more aggressive batch sizes / GPU packing
+than earlier probes (A0/A1/A2), and this is NOT a comparability problem worth protecting against right
+now. The working evaluation criterion during this phase is direct listening, not a controlled ablation
+table; if/when paper-grade side-by-side numbers are needed, the earlier baselines can simply be re-run
+under matching conditions at that point. Each run must still be internally consistent (its own LR curve
+must match its own batch size), but cross-run comparability during exploration is explicitly not a
+constraint to design around.
+
+### GPU utilization measured (A0/A1, 39 samples each): real headroom on both axes
+
+VRAM: mean ~7.7 GB, peak 7.92 GB, of 81,559 MB/GPU (~9.7%) — essentially flat, not spiky, meaning
+batch_size has enormous room to grow. Compute util: mean ~68%, peak 100%, min 0% — real idle stretches,
+though less dramatic than the VRAM headroom. Two distinct levers, not one:
+  - **Raise batch_size** for training jobs (A2S has no frozen-encoder-in-the-loop cost the way S2A
+    does, so this should be a cleaner win here than it would be for S2A).
+  - **Stop DDP-parallelizing one experiment across all 4 GPUs by default.** TamIA bills a whole h100
+    node regardless of how many of its 4 GPUs a job actually uses. For a SWEEP of N small, fast
+    variants (exactly what A2S probes are), running N independent single-GPU lanes concurrently within
+    ONE node allocation gets N results after ONE round of queue wait, instead of N sequential
+    whole-node jobs each separately queued. For A2S specifically (epochs are ~1 min under 4-way DDP,
+    so single-GPU would be roughly ~4 min/epoch) the WALL-CLOCK cost per experiment goes up, but the
+    QUEUE-WAIT cost for N experiments goes down by roughly N — and queue wait, not raw compute, has
+    been the measured dominant cost on this cluster all along (see the earlier `sshare`/backfill notes
+    in CONTEXT.md). Generation-only jobs should default to using all 4 GPUs regardless (already
+    updated in the oracle-ablation script's own pattern — 2 lanes on 2 GPUs, should have been 4).
+
+## 2026-08-26: O-F built and launched — CTC probe converges cleanly, one real cuDNN bug caught by the real job
+
+### CTC probe (job 428711, `scripts/a2s/train_ctc_probe.py`): converges well
+
+60 epochs, ~0.3 min/epoch (~19 min total). **best_wer=0.4145** at epoch 51. Transcripts are
+genuinely legible, not noise:
+
+```
+REF: Let's see if she starts this time. Come on, old girl, wake up!
+HYP: let's see if she' starts this time come on oll gir wak up
+```
+
+This is a real, usable content-loss head — most words correct, a few phonetic slips (`old`→`oll`,
+`girl`→`gir`). De-risks the O-F pipeline: the frozen scorer genuinely understands AudioLDM's own
+mel frontend well enough to provide a real content gradient, not just noise.
+
+### First O-F training attempt (job 428712) failed in 35s — a real, GPU-only bug
+
+`RuntimeError: cudnn RNN backward can only be called in training mode`. Setup (VAE decoder, frozen
+CTC head, U-Net, conditioner) all loaded correctly and logged right — it failed on the FIRST
+`loss.backward()` call. Root cause: cuDNN's fused RNN (GRU) kernel only allocates the reserve-space
+its own backward pass needs when the module is in `.train()` mode; `.eval()` skips that allocation
+entirely, so gradient flowing THROUGH a frozen-but-eval GRU fails outright, regardless of
+`requires_grad_(False)` on its parameters (that governs whether IT gets updated, not whether cuDNN
+saved what its backward needs).
+
+**Worth noting for the record**: a login-node CPU test of this exact code path — the discipline
+adopted earlier this session after correctly being called out for running forward passes on the
+login node — would NOT have caught this bug anyway, since it is specifically a cuDNN/GPU fused-kernel
+behavior with no CPU equivalent. The real Slurm job was the correct, and only, venue this could have
+been caught in. Fixed: keep `ctc_head.eval()` overall (BatchNorm2d needs frozen running stats, the
+actual reason for freezing at all) but call `ctc_head.rnn.train()` specifically, so only the GRU
+submodule gets cuDNN's training-mode backward path. Side effect: re-enables the GRU's inter-layer
+dropout (0.1, between 2 layers) during O-F scoring — accepted as minor, harmless stochasticity on an
+already-converged, never-updated component, not a correctness issue.
+
+### Account switch mid-flight: aip-csubakan → aip-ravanelm
+
+The original CTC-probe submission (426893) sat PENDING for ~22.5 hours (submitted 2026-08-25T05:41,
+still queued the next day) — worse than the "18 hours" the user's own estimate, confirmed by
+`sacct`. `sshare` showed a real, current ~2x FairShare gap favoring `aip-ravanelm`
+(lovenya's own row: 0.0555 csubakan vs 0.1116 ravanelm), driven by tonight's own run history —
+csubakan absorbed every earlier A2S job (A0/A1/oracle/A2), so its recent-usage-weighted share
+dropped while ravanelm sat comparatively idle. User's call, not resolved by prediction: submitted a
+second pair on ravanelm rather than cancelling the first blind, and let both race — the ravanelm
+CTC-probe job started running within ~4 minutes of submission, at which point (a real result, not a
+guess) the original csubakan pair was cancelled. Zero compute lost either way, since cancelled jobs
+had never left PENDING.
+
+**Methodology note for future account decisions**: `squeue --start` predictions are confirmed
+unreliable in BOTH directions this session — one job's predicted start moved 14 hours LATER between
+two checks minutes apart. The "let both pairs race, cancel the loser once a real winner starts"
+pattern used here is the honest response to that unpredictability: it costs nothing while pending,
+and converts a guess into a decision made on an actual outcome.
+
+### O-F run relaunched (job 428814, account aip-ravanelm) with the cuDNN fix
+
+`RUN_NAME=probe40_A3_o2_ctc`, `EXTRA="configs/exp/o2_align.yaml configs/exp/o2_align_ctc.yaml"`.
+lambda_align=1.0 (cosine, same as A1) + lambda_ctc=1.0 (new). Pre-registered prediction, consistent
+with everything measured so far tonight: if the CLAP-text ceiling (oracle result) is the real
+bottleneck, O-F's content loss should measurably close some of the comprehensibility gap even though
+CLAP-text's own retrieval numbers (r1/cos) may not move much or at all — those two metrics are now
+expected to partially decouple, since O-F targets word content directly rather than through the
+CLAP-embedding proxy O2 optimizes.
+
+## 2026-08-26b: the F1/F2 reframe — deep research resolves the direction, and validates the oracle result from an independent source
+
+Spawned an opus/Plan research agent (full context of the night's investigation + the user's specific
+questions about BEATs, AudioLDM2's actual recipe, and Audio-Omni) with real web research authorized.
+Full report preserved in this entry; see conversation for the complete verbatim result if needed.
+
+### The headline: AudioLDM 2's own paper independently confirms the oracle ablation
+
+AudioLDM 2 uses a pooling rate λ on its GPT-2-produced conditioning sequence: **λ=8** for general
+text-to-audio/music, but **λ=1 — full temporal resolution, no pooling — specifically and only for
+speech**, because (their stated reason) pooled features lose the detail speech needs. Concretely:
+64 tokens/10s (6.4 tok/s) for general audio vs **512 tokens/10s (51.2 tok/s) for TTS**, against our
+current **one pooled vector for the whole clip (~0 tok/s)**. Human speech runs ~10-15 phonemes/s;
+their TTS conditioning comfortably oversamples it, ours delivers zero temporal resolution at all.
+
+**Our oracle-conditioning ablation (2026-08-24b) and AudioLDM 2's own λ ablation are the same
+experiment run from opposite directions, and they agree.** This is independent, external
+confirmation — from the authors of our own backbone's successor — that a pooled global vector is
+structurally incapable of carrying speech content, regardless of how good the vector is.
+
+### The reframe: two separate failures were being measured as one metric
+
+- **F1 — content origination**: WHICH words should be said. Information-theoretic, not
+  architectural — ambient audio does not determine a transcript. The ridge probe (2026-08-24)
+  already quantified how much signal exists here: R@1@16≈0.45 vs chance 0.0625 (~7x), real but
+  coarse/topic-level. No architecture change fixes this; it needs a different kind of solution
+  (predicting a plausible transcript, or accepting scene-appropriate-not-verbatim as the target).
+- **F2 — phonetic realizability**: CAN the model render crisp words at all, given content. Purely
+  architectural, and fixable. The oracle test isolated this precisely: a PERFECT CLAP-text vector
+  still produced "foreign language" — proving F2 is broken independent of F1.
+
+**Consequence that changes how every WER number tonight should be read**: WER-vs-ground-truth
+conflates F1 and F2 and cannot distinguish them. Even a flawless F1 solution would still score
+WER≈1.0 today because F2 is broken, AND the metric cannot tell "correct English words, wrong
+content" from pure babble — both score ≥1.0. This means **O-F's result cannot be correctly judged
+by the WER numbers gathered tonight**: its CTC loss genuinely dropped (0.3965→0.2968, real
+learning), and whether that bought real phonetic content is literally invisible to the current
+metric. Not evidence O-F failed — evidence the measurement can't see the thing O-F might have
+fixed. A content-independent metric (Rank 0 below) is required before any O-F verdict is safe to
+draw.
+
+### An unexpected asset already in the pretrained U-Net
+
+Verified from the actual `cvssp/audioldm-s-full-v2` U-Net config:
+`cross_attention_dim == block_out_channels` exactly at three of four resolutions — the fingerprint
+of `attn2` currently running as a second SELF-attention layer (diffusers falls back to
+`encoder_hidden_states = hidden_states` when passed `None`), not real cross-attention. Adding a
+genuine content stream is therefore an ADAPTER-SCALE change (~10-30M params, IP-Adapter precedent:
+22M params matched full fine-tuning), not a re-architecture — and with zero-init output projections,
+training starts bit-identical to the current baseline and can only improve monotonically.
+**Our own already-trained CTC probe's encoder** (WER 0.41 on AudioLDM's exact mel frontend, an
+asset no off-the-shelf model can replace, since none match 16kHz/64-mel) is a ready-made, in-domain
+content-sequence source for this — turns O-F from a dead-end experiment into reusable infrastructure.
+
+### Audio-Omni — verdict: do not invest, researched (not just locally inspected)
+
+Confirmed from the actual paper: transcript is a MANDATORY input for every speech task (character-
+level Transcript Encoder) — same "needs content as input" shape as AudioLDM2-speech, just bigger and
+far less supported. No training code released (repo is inference-only), CC BY-NC 4.0 (non-commercial),
+completely different pipeline (own Oobleck VAE, 44.1kHz stereo — nothing transfers from our 16kHz mel
+stack), zero independent evaluation (arXiv 2026-04-12, SIGGRAPH 2026, no community reproduction).
+Its headline speech WER (1.77) is a RENDERING-fidelity number (F2), not evidence it solves F1 — the
+actual open problem. User's framing ("produces both audio and speech, understands both") is true of
+the two halves individually but they are not wired together in a way that lets it decide WHAT to say.
+
+### BEATs — settled
+
+Paper's own stated design goal: discard fine-grained detail in favor of high-level semantics — the
+opposite of what content needs. Same family as CLAP (scene/event SSL), not Whisper (content). Only
+legitimate use: an alternative AMBIENT-SCENE encoder, decided by the existing
+`scripts/retrieval_baseline.py` ridge probe in about an hour, zero training. Decision rule: if it
+doesn't beat CLAP's 0.45 on that probe, drop permanently, never run a training job on the strength
+of it alone.
+
+### Ranked plan (full detail, costs, and falsification tests in the agent's report)
+
+0. **Content-independent intelligibility metric** (inter-ASR agreement between two different ASR
+   architectures, real-word rate, Whisper confidence) — retro-score every generation already on
+   disk, including A3/O-F. Hours, no training. Blocking: unreadable results otherwise.
+1. **Oracle-transcript cascade** (real transcript → Kokoro-82M and/or `audioldm2-gigaspeech`) —
+   establishes the F2 ceiling. Afternoon, inference only.
+2. **Zero-init gated cross-attention content stream on OUR OWN U-Net** (espeak phonemes, or our own
+   CTC probe's encoder) — the real F2 fix, adapter-scale, keeps the shared S2A/A2S backbone story
+   intact. Gate with an early falsification test: a FEW epochs with the ORACLE content stream: if
+   that doesn't move the Rank-0 metric fast, the wiring or the hypothesis is wrong, kill cheap.
+3. **Cross-attention over the ambient input** — bandwidth/register/prosody improvement, explicitly
+   NOT expected to fix content (32 CLAP frames of ambient audio carry no lexical content to begin
+   with). Score on CLAP-audio similarity / FAD / scene-appropriateness, never WER.
+4. **Reframe F1 as the actual research contribution.** Searched specifically for prior art:
+   UmbraTTS, Audio-Omni, AudioLDM2-TTS, F5-TTS all require text as mandatory input — nobody in the
+   field infers content from scene alone. That's this project's unclaimed problem. Cheapest Stage-A
+   baseline: retrieval against training transcripts using the existing ridge/conditioner apparatus
+   (zero training, immediately gives a complete listenable end-to-end system when paired with Rank 1).
+
+### Deliberately chosen against (full table in agent report)
+
+Audio-Omni as backbone; switching A2S wholesale to AudioLDM 2 (breaks S2A/A2S symmetry, TTS
+checkpoints have no published WER, community diffusers conversions on a personal account); more
+conditioner training on the pooled interface in any form (settled by the oracle test); a different
+pooled target (same failure mode as CLAP-text, the oracle result covers the whole family); bigger
+CTC head / higher O-F weight without fixing the channel first; BEATs as a content encoder;
+continuing WER-vs-ground-truth as the PRIMARY progress metric (keep as a diagnostic, stop steering
+on it).
+
+## 2026-08-26c: Rank 2 built and launched — a real cross-attention content channel, using diffusers' own IP-Adapter mechanism
+
+Built and queued all four items from the 2026-08-26b ranked plan in one session:
+
+- **429378 — Rank 0**, content-independent intelligibility (`scripts/a2s/score_intelligibility.py`):
+  inter-ASR agreement (Whisper-large-v3 vs our own frozen CTC probe -- two architecturally
+  different judges, neither in any training loop) + real-word rate against a vocabulary built
+  from our own train-split transcripts (no external download). Retro-scores every generation
+  lane already on disk, A0 through A3.
+- **429392 — Rank 1**, oracle-transcript TTS cascade (`scripts/a2s/run_oracle_tts_cascade.py`):
+  renders REAL target transcripts via Kokoro-82M and `audioldm2_gigaspeech` (both freshly
+  downloaded by the user; `AudioLDM2Pipeline` already worked with our existing diffusers
+  0.39.0, no install needed for that half). Verified against the actual downloaded checkpoint
+  before running: `language_model/config.json` genuinely ships `max_new_tokens: 8` (the trap
+  the research flagged) and `text_encoder_2`/`tokenizer_2` are genuinely VITS-based --
+  confirms the research precisely, not just plausible. `max_new_tokens=512` set explicitly.
+  Kokoro's actual API differed from assumption in two places, both caught by reading the
+  installed source before running: `voice` is a REQUIRED argument (`af_heart` used, matching
+  the source's own error-message example), and `Result.__iter__` yields exactly
+  `(graphemes, phonemes, audio)` via an explicit backward-compat shim.
+- **429095**, the earlier (label-bug-fixed) WER-vs-ground-truth scorer, kept as a secondary
+  diagnostic per the F1/F2 reframe -- no longer the primary signal.
+- **429416 — Rank 2**, a real content cross-attention channel on the pretrained U-Net
+  (`src/salm/a2s/content_adapter.py`). Falsification test: 12 epochs, oracle content (the
+  frozen CTC probe's encoder output on the TARGET SPEECH's own mel -- available during
+  training, never at real A2S inference; the question is narrowly "can the U-Net learn to
+  use a real sequence at all", not yet "can we supply one at inference").
+
+### The mechanism, verified end-to-end against installed diffusers source (0.39.0), not assumed
+
+Used `diffusers.models.attention_processor.IPAdapterAttnProcessor2_0` -- an official,
+battle-tested adapter pattern -- rather than hand-rolled attention mechanics, specifically
+because:
+
+- `cross_attention_dim == block_out_channels` exactly in our U-Net's config, confirming
+  `attn2`'s `to_k`/`to_v` are calibrated to accept the block's OWN latent width (since
+  `encoder_hidden_states=None` makes it fall back to self-attention today) -- reusing that
+  pathway for an external, differently-shaped content sequence would mean retraining
+  pretrained weights from a mismatched start, destroying the zero-init safety property.
+- Verified `UNet2DConditionModel.process_encoder_hidden_states()` is a genuine no-op for our
+  config (`encoder_hid_dim_type` is `None`, every special-cased branch skipped), so a raw
+  tuple `encoder_hidden_states=(None, [content_seq])` passes through completely unmodified
+  to the attention layers, where it unpacks to: primary branch stays `None` -> falls back to
+  today's exact self-attention behaviour, unchanged; new `ip_hidden_states` branch receives
+  the content sequence.
+- Verified `Attention.set_processor()` does plain `self.processor = processor`, and since
+  `IPAdapterAttnProcessor2_0` IS an `nn.Module`, standard PyTorch submodule registration
+  means its new parameters (`to_k_ip`/`to_v_ip`) show up in `unet.parameters()` automatically
+  -- confirmed the existing `[p for p in unet.parameters() if p.requires_grad]` param-group
+  construction needs no changes to pick them up.
+- `to_v_ip` explicitly zero-initialized after construction (not zero by default in
+  diffusers' own constructor) so the new branch's output is exactly zero at init regardless
+  of the (randomly-initialized) query/key attention pattern -- the model is bit-identical to
+  today's baseline at step 0, same zero-init discipline as O2's null embedding.
+- `set_attn_processor` requires a processor for EVERY attention layer if given a dict
+  (verified: raises if the count doesn't match) -- attn1 (self-attention) entries are
+  explicitly carried over unchanged, not omitted, so nothing about self-attention changes.
+
+Content source: `SimpleCTCASR.encode()` (new method -- the conv+GRU trunk's output, before
+the final vocab head), run on the target speech's own mel, on the fly (no new precompute --
+this is deliberately throwaway/oracle, not a production path). `A2SLatentDataset` extended
+to expose `speech_file` per row for this.
+
+### DDP safety confirmed
+
+The new adapter is installed BEFORE `DistributedDataParallel(unet, ...)` wraps it (verified
+by line order), so DDP's parameter snapshot includes the new weights. The D1/D2 diagnostic's
+own separate `unet(...)` call (a different code path, testing sensitivity to POOLED
+`class_labels` specifically) is decorated `@torch.no_grad()` -- confirmed no backward pass
+happens there, so no DDP unused-parameter conflict with the new branch, which DOES receive
+gradient on every real training step (content_kwargs always supplies the real tuple when the
+flag is on, no conditional skipping that could leave the new params unused on some steps).
+
+### What would falsify this cheaply, if it doesn't work
+
+If val_clap_r1 and train_align show no different a trend than A1's plain-O2 baseline within
+these 12 epochs, that's real information: either the wiring has a bug not caught by static
+review (real risk -- this is the least execution-tested code of the night, since I could not
+run the forward pass on the login node to iteratively debug it, per the discipline adopted
+after the earlier cuDNN incident), or a rate of ~25 fps (our CTC probe's own frame rate) is
+still not enough, or oracle content alone isn't sufficient signal at 12 epochs. Any of these
+is cheap to have learned before building a non-oracle content source and the generation-side
+wiring the real (inference-usable) version would need.
