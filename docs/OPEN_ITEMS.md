@@ -557,24 +557,35 @@ decided by the existing `scripts/retrieval_baseline.py` ridge probe (~1 hour, ze
 doesn't beat CLAP's 0.45, drop permanently.
 
 **Ranked plan** (costs/falsification tests in EXPERIMENT_LOG 2026-08-26b and the agent's full report):
-- **[RUNNING 2026-08-26c, job 429378] Rank 0**: content-independent intelligibility metric
+- **[DONE 2026-08-26c, job 429378] Rank 0**: content-independent intelligibility metric
   (`scripts/a2s/score_intelligibility.py` — inter-ASR agreement between Whisper-large-v3 and our
   own frozen CTC probe, real-word rate against a vocabulary built from our own train transcripts).
-  Retro-scoring every generation lane on disk (A0-A3).
-- **[RUNNING 2026-08-26c, job 429392] Rank 1**: oracle-transcript cascade
-  (`scripts/a2s/run_oracle_tts_cascade.py`, Kokoro-82M + `audioldm2_gigaspeech`, both downloaded).
-  Verified against the real checkpoint before running: `max_new_tokens: 8` genuinely ships in
-  `language_model/config.json` (set to 512 explicitly), `voice` is a required Kokoro argument
-  (`af_heart`, matching the source's own error-message example) — both caught by reading installed
-  source, not by a failed run.
-- **[RUNNING 2026-08-26c, job 429416] Rank 2**: zero-init gated cross-attention content stream,
+  Retro-scored every generation lane on disk (A0-A3) plus the oracle ablation. Result: inter-ASR
+  distance sits flat at 0.955-0.993 across EVERY lane, including the fully unconditioned baseline
+  and the oracle-perfect-CLAP-text ablation -- no separation anywhere. Decisive negative: O2,
+  InfoNCE, and O-F/CTC content loss all fail to move F2 intelligibility at all on the pooled-vector
+  interface. See EXPERIMENT_LOG 2026-08-27.
+- **[ABANDONED 2026-08-27] Rank 1**: oracle-transcript TTS cascade
+  (`scripts/a2s/run_oracle_tts_cascade.py`). Job 429392 failed both lanes on environment (missing
+  `espeak` binary for AudioLDM2-GigaSpeech's VITS tokenizer; Kokoro's misaki G2P needs network
+  access at runtime for an uncached spacy model, unavailable on compute nodes). Root causes were
+  found and are fixable (`PHONEMIZER_ESPEAK_LIBRARY` + `espeakng-loader`; pre-installing
+  `en_core_web_sm` on the login node before the job runs) -- but the user correctly called this
+  redundant: SpeechAudioLM already has a cascaded ASR+TTS baseline, so re-deriving an "upper bound
+  with perfect ASR+TTS" here duplicates existing work for no new information. Not pursuing further;
+  the environment fixes above are recorded in case this is ever revisited, not as a to-do.
+- **[FIXED 2026-08-27, resubmitting] Rank 2**: zero-init gated cross-attention content stream,
   built via diffusers' own `IPAdapterAttnProcessor2_0` rather than hand-rolled attention mechanics
   (`src/salm/a2s/content_adapter.py`) — verified end-to-end against installed diffusers source (see
   EXPERIMENT_LOG 2026-08-26c for the full mechanism). 12-epoch falsification test, ORACLE content
   (frozen CTC probe's encoder on the TARGET SPEECH's own mel — training-only, never at real A2S
-  inference). This is the LEAST execution-tested code of the night — could not run the forward pass
-  on the login node to iteratively debug, so real risk of a bug static review missed remains until
-  the job's own result comes back.
+  inference). Job 429416 crashed on all 4 ranks in ~22s: the newly-installed attn2 processors were
+  constructed on CPU (no device kwarg) and never moved to `device` before DDP wrap. Fixed in
+  `afb41d7` (`unet = unet.to(device)` after installation). This remains the one test in the plan
+  that changes the U-Net's actual capacity to carry phoneme-level content rather than just changing
+  the training signal on a pooled vector -- and Rank 0's flat result makes it the load-bearing one:
+  none of the three loss-function mitigations moved F2 at all, so whether a real sequence channel
+  can is the open question the rest of the plan hinges on.
 - **[IMPL] Rank 3**: cross-attention over the ambient input — bandwidth/register/prosody, explicitly
   NOT expected to fix content. Score on CLAP-audio similarity / FAD / scene-appropriateness, **never
   WER** — scoring a register win on an intelligibility axis is how a real success gets read as a

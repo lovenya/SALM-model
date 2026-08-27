@@ -1700,3 +1700,67 @@ after the earlier cuDNN incident), or a rate of ~25 fps (our CTC probe's own fra
 still not enough, or oracle content alone isn't sufficient signal at 12 epochs. Any of these
 is cheap to have learned before building a non-oracle content source and the generation-side
 wiring the real (inference-usable) version would need.
+
+## 2026-08-27: Rank 0/1/2 results -- a decisive negative, one real bug, and Rank 1 dropped as redundant
+
+All four 2026-08-26c jobs finished overnight. Two completed, two failed.
+
+### Rank 0 (429095 WER + 429378 intelligibility) -- COMPLETE, decisive negative
+
+WER-vs-ground-truth: every lane scores 0.995-1.54 (garbage everywhere, as expected -- kept
+only as a secondary diagnostic per the F1/F2 reframe, not steered on).
+
+The load-bearing number is inter-ASR distance (Rank 0's content-independent F2 metric): it
+sits **flat at 0.955-0.993 across every single lane** -- plain baseline, O2, InfoNCE, O-F/CTC,
+the fully unconditioned generation, and even the oracle-ablation run with a *perfect*
+CLAP-text target. No separation anywhere, on n=16 per lane. This is a decisive result, not an
+inconclusive one: three genuinely different training signals (cosine, InfoNCE's added
+repulsion term, and a real CTC-supervised content gradient via O-F) were each pushed at the
+same pooled-vector-into-`class_labels` interface, and none of them moved F2 at all -- including
+the one (O-F) that supervises phonetic content directly. The bottleneck is not a training-signal
+problem on this interface; it is the interface itself. This sharpens Rank 2 from "one of four
+things to try" into the one test that actually changes the architecture's capacity to carry
+phoneme-level information, rather than just changing how hard the pooled vector is optimized
+toward a target.
+
+### Rank 1 (429392 oracle-tts cascade) -- FAILED on environment, then ABANDONED as redundant
+
+Both lanes failed on environment, not code:
+- AudioLDM2-GigaSpeech: `RuntimeError: espeak not installed on your system` -- the VITS
+  tokenizer's `phonemizer` backend needs the `espeak`/`espeak-ng` system binary, absent on the
+  compute node (confirmed absent as a module too: `module spider espeak` finds nothing).
+- Kokoro: `ConnectTimeout` to `raw.githubusercontent.com` -- traced to
+  `misaki/en.py:G2P.__init__`, which calls `spacy.cli.download("en_core_web_sm")` whenever
+  `spacy.util.is_package(...)` is False (confirmed False in this venv) -- a network fetch with
+  no compute-node internet.
+
+Both are fixable without a system-level install: `phonemizer` reads a `PHONEMIZER_ESPEAK_LIBRARY`
+env var (confirmed in `phonemizer/backend/espeak/wrapper.py`), which the `espeakng-loader` PyPI
+package is built to satisfy with a bundled shared library; the spacy fetch is avoided entirely by
+pre-installing `en_core_web_sm` into the venv on the login node (which has internet) before the
+job runs, so `is_package` returns True and the download path never triggers. Investigated but
+**not pursued**: the user pointed out this whole test is redundant with SpeechAudioLM's existing
+cascaded ASR+TTS baseline -- an "upper bound with perfect ASR+TTS" duplicates a system we already
+have, for no new information about the actual A2S model. Correct call; recorded here so the fix
+isn't re-derived if this is ever revisited, not because it's still a to-do.
+
+### Rank 2 (429416 xattn-falsification) -- FAILED on a real bug, now fixed
+
+Crashed on all 4 ranks in ~22s, before any real training step:
+```
+ValueError: DistributedDataParallel's input module must be on the same type of devices,
+but input module parameters locate in {'cuda', 'cpu'}.
+```
+Root cause: `install_content_cross_attention()` constructs the new `IPAdapterAttnProcessor2_0`
+layers with no device kwarg (defaults to CPU) and attaches them via `unet.set_attn_processor()`.
+`unet` itself was already `.to(device)`'d at load time (before this call runs), so the new attn2
+processors were stranded on CPU while the rest of the U-Net sat on CUDA -- exactly the
+un-execution-tested risk flagged when this code was written, now confirmed for real. Fixed in
+`afb41d7`: a second `unet = unet.to(device)` immediately after installation, which recursively
+moves the new submodules too. Resubmitting.
+
+### Where this leaves the plan
+
+Rank 3 and Rank 4 remain deferred pending Rank 2's actual result, same as before -- Rank 0's flat
+result doesn't change that ordering, it just raises the stakes on what Rank 2 shows. Rank 1 is
+dropped, not just deferred: no further time on the espeak/Kokoro environment fixes above.
