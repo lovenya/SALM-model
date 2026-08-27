@@ -45,4 +45,29 @@ Read-only Slurm inspection is always fine: `squeue`, `sacct`, `sinfo`, `sshare`,
   read of `site-packages` would have caught.
 - Heavy artifacts live in `/scratch/l/lovenya/salm_model_outputs`, never in git.
 
+## HARD RULE: every job gets an expected-results writeup before/at submission
+
+**Whenever recommending or submitting a job — every job, not just the notable ones — state
+up front: what does success look like, what does failure look like, and what does EACH
+outcome actually tell us.** Not a vague "we'll see how it goes" — name the specific metric(s)
+that will actually move if the hypothesis is right, confirm (by reading the code, not
+assuming) that those metrics are actually wired to reflect what's being tested, and say
+what each concrete outcome (success / failure / ambiguous) implies for what to do next.
+
+This surfaces real gaps before they're wasted compute: job 430049 (Rank 2 falsification,
+2026-08-27) is the example that prompted this rule — the submission script's own
+auto-printed summary reports `val_clap_r1`/`train_align`/`val_d2_gap`, but by construction
+NONE of the three reflect the new content cross-attention channel (`val_clap_r1`/`train_align`
+come from the conditioner's own output, which the new channel never touches; `val_d2_gap`'s
+diagnostic pass is a separate `@torch.no_grad()` call documented as blind to it too). The
+metric that actually would show it (`val_loss`/`x0_rel_mse`, since the new channel feeds
+into the U-Net's own denoising accuracy) isn't even in the auto-print, though it IS recorded
+in `history.json` every epoch. This was only caught by reading the metric computation, not
+by reading the job's own summary of itself — a template's default output is not a substitute
+for checking what a specific run's success condition actually requires.
+
+Applies to every job going forward, and to the plan/config the job comes from, not just the
+sbatch script — the goal is that neither the agent nor the user learns "wait, what would even
+count as this job working?" only after it finishes.
+
 See `CONTEXT.md` for project state, decisions, and the data/architecture details.
