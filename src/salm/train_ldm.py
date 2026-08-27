@@ -929,15 +929,27 @@ def main() -> int:
         perm = torch.empty_like(order)
         perm[order] = order.roll(-1)
 
+        # IP-Adapter processors require their content tuple on every U-Net forward.
+        # Keep one oracle sequence fixed, so D1/D2 still measure only class labels.
+        content_kwargs = {"encoder_hidden_states": None}
+        if cfg.use_content_xattn:
+            from salm.a2s.content_adapter import content_encoder_hidden_states
+            from salm.data.frontend import AUDIOLDM_CLIP_SECONDS, load_waveform_mono_16k
+
+            with torch.no_grad():
+                wavs = [
+                    load_waveform_mono_16k(
+                        f, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left"
+                    )
+                    for f in batch["speech_file"]
+                ]
+                wav_t = torch.from_numpy(np.stack(wavs)).float().to(device)
+                target_mel = content_extractor.batch(wav_t)
+                content_seq = ctc_head.encode(target_mel)
+            content_kwargs["encoder_hidden_states"] = content_encoder_hidden_states(content_seq)
+
         def eps(c):
-            # Deliberately encoder_hidden_states=None even when use_content_xattn is active:
-            # D1/D2 isolate sensitivity to the POOLED class_labels conditioning specifically
-            # (shuffled/null/zero variants), a different axis from Rank 2's content channel.
-            # Threading a real content sequence through here would need four content
-            # sequences too and muddy exactly what's being isolated -- out of scope for what
-            # this diagnostic answers. Known consequence: D1/D2 numbers do not reflect the
-            # content-xattn pathway's contribution when it is on.
-            return unet(noisy, timesteps, encoder_hidden_states=None, class_labels=c).sample
+            return unet(noisy, timesteps, class_labels=c, **content_kwargs).sample
 
         e_c = eps(cond)
         e_s = eps(cond[perm])
