@@ -50,6 +50,11 @@ TRAIN_MINUTES="${TRAIN_MINUTES:-95}"
 NUM_GEN="${NUM_GEN:-16}"
 ALIGN_TARGET="${ALIGN_TARGET:-text}"
 COND_ROOT="${COND_ROOT:-$OUTPUTS_ROOT/features_a2s_cond}"
+# Both default to every earlier A2S probe's value (batch_size=16 -> 274 steps/epoch), so a
+# plain invocation is unchanged. Override together -- lr_total_steps must equal
+# steps_per_epoch * EPOCHS for THIS batch_size, or the LR curve lands at the wrong position.
+BATCH_SIZE="${BATCH_SIZE:-16}"
+LR_TOTAL_STEPS="${LR_TOTAL_STEPS:-}"
 
 RUN_DIR="$RUNS_ROOT/$ARCH/$RUN_NAME"
 LOG_DIR="$RUN_DIR/logs"
@@ -133,6 +138,11 @@ for f in ${EXTRA_CONFIGS[@]+"${EXTRA_CONFIGS[@]}"}; do
     echo "extra config: $f"
 done
 
+# lr_total_steps only overridden when explicitly set -- otherwise leave the EXP config's own
+# default alone, since it's tuned to that config's own EPOCHS/batch_size already.
+BATCH_ARGS=("batch_size=$BATCH_SIZE")
+[[ -n "$LR_TOTAL_STEPS" ]] && BATCH_ARGS+=("lr_total_steps=$LR_TOTAL_STEPS")
+
 torchrun --nproc_per_node=4 --master_port=29543 -m salm.train_ldm \
     --config configs/base/a2s_audioldm.yaml "configs/arch/${ARCH}.yaml" "$EXP" \
         ${EXTRA_CONFIGS[@]+"${EXTRA_CONFIGS[@]}"} \
@@ -143,6 +153,7 @@ torchrun --nproc_per_node=4 --master_port=29543 -m salm.train_ldm \
         "align_target=$ALIGN_TARGET" \
         "cond_features_root=$COND_ROOT" \
         "max_train_minutes=$TRAIN_MINUTES" \
+        "${BATCH_ARGS[@]}" \
         ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
     2>&1 | tee -a "$LOG_DIR/01_train.log"
 
