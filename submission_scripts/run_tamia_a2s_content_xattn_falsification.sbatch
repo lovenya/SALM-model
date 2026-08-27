@@ -36,6 +36,12 @@ ARCH="${ARCH:-a2s_audioldm_clapseq_xformer}"
 RUN_NAME="${RUN_NAME:-content_xattn_falsify_v1}"
 EPOCHS="${EPOCHS:-12}"
 TRAIN_MINUTES="${TRAIN_MINUTES:-75}"
+# Both default to what every other A2S probe used (batch_size=16 -> 274 steps/epoch), so a
+# plain invocation is bit-identical to before. Pass both together if overriding either --
+# lr_total_steps must match steps_per_epoch * EPOCHS for THIS batch_size, or the LR curve
+# lands at the wrong position for the epoch budget actually run.
+BATCH_SIZE="${BATCH_SIZE:-16}"
+LR_TOTAL_STEPS="${LR_TOTAL_STEPS:-27400}"
 
 RUN_DIR="$RUNS_ROOT/$ARCH/$RUN_NAME"
 LOG_DIR="$RUN_DIR/logs"
@@ -81,6 +87,7 @@ torchrun --nproc_per_node=4 --master_port=29545 -m salm.train_ldm \
     --override \
         "run_name=$RUN_NAME" "arch=$ARCH" "epochs=$EPOCHS" \
         "max_train_minutes=$TRAIN_MINUTES" \
+        "batch_size=$BATCH_SIZE" "lr_total_steps=$LR_TOTAL_STEPS" \
         ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
     2>&1 | tee -a "$LOG_DIR/train.log"
 
@@ -94,6 +101,10 @@ print(f"epochs completed: {len(h)}")
 if h:
     def series(k):
         return [(r["epoch"], r[k]) for r in h if r.get(k) is not None]
+    for key in ("val_loss", "val_x0_rel_mse"):
+        values = series(key)
+        if values:
+            print(f"{key}: first={values[0][1]:.4f} last={values[-1][1]:.4f}")
     r1 = series("val_clap_r1")
     chance = next((r["val_clap_r1_chance"] for r in h if r.get("val_clap_r1_chance") is not None), None)
     if r1:
@@ -107,8 +118,7 @@ if h:
     d2 = series("val_d2_gap")
     if d2:
         print(f"val_d2_gap : first={d2[0][1]:.4f} last={d2[-1][1]:.4f}  "
-              "(sensitivity to conditioning at all -- NOTE: does not reflect the new "
-              "content-xattn channel, see the comment at its call site in train_ldm.py)")
+              "(pooled-condition sensitivity with oracle content held fixed)")
 else:
     print("NO epochs completed -- check the log above for a crash.")
 PY
