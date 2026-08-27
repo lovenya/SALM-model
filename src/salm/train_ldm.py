@@ -683,6 +683,13 @@ def main() -> int:
 
         content_extractor = MelExtractor(MelConfig(norm_mode="none"), device=device)
         adapted = install_content_cross_attention(unet, content_dim=ctc_head.encoder_dim)
+        # install_content_cross_attention constructs the new IPAdapterAttnProcessor2_0
+        # layers on CPU (no device kwarg) and attaches them via set_attn_processor -- unet
+        # itself was already .to(device)'d at load time, so without this the new attn2
+        # processors are stranded on CPU while the rest of the U-Net is on CUDA, and DDP
+        # wrapping fails with "input module parameters locate in {'cuda', 'cpu'}" (confirmed
+        # by job 429416, all 4 ranks, ~22s in -- before any real training step).
+        unet = unet.to(device)
         log(f"    installed content cross-attention on {len(adapted)} attn2 layers "
             f"(content_dim={ctc_head.encoder_dim}): {adapted}")
 
