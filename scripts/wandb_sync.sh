@@ -57,19 +57,31 @@ if squeue -u "$USER" -h -t R 2>/dev/null | grep -q .; then
     sleep 10
 fi
 
-# ONE invocation with every directory, not a loop. In wandb 0.28.1 `wandb sync` reroutes to
-# `wandb beta sync`, which orders fragments belonging to the same run id by start time itself --
-# a resumed run writes several offline dirs sharing one id, and letting beta sync see them all
-# together is more reliable than us sorting directory names. Re-running is safe: beta sync
-# defaults to skip_synced=True, keyed on a `<name>.wandb.synced` marker.
+# ONE PER DIRECTORY, not batched. 2026-08-27: a single corrupted transaction log
+# (`transactionlog: error getting next record: EOF`, from a run that died mid-write) made a
+# batched `wandb sync dir1 dir2 dir3 ...` call silently stop processing the REST of the
+# batch too -- the command still exited 0 and this script printed "synced", but only the
+# runs that happened to be ordered before the corrupted one ever got a `.wandb.synced`
+# marker. Confirmed by re-running the exact same runs individually: every one of them
+# synced cleanly on its own. Slower (one process launch per run) but a bad run can only
+# ever cost that one run, never the rest of the batch.
 echo
-if wandb sync --yes --project "$WANDB_PROJECT" --entity "$WANDB_ENTITY" "${OFFLINE[@]}"; then
+FAILED=()
+for d in "${OFFLINE[@]}"; do
+    echo "--- $d"
+    if ! wandb sync --yes --project "$WANDB_PROJECT" --entity "$WANDB_ENTITY" "$d"; then
+        echo "  FAILED (see error above) -- continuing with the rest" >&2
+        FAILED+=("$d")
+    fi
+done
+echo
+echo "markers written:"
+find "$SEARCH_ROOT" -name "*.wandb.synced" 2>/dev/null | wc -l
+echo "offline dirs are safe to delete AFTER syncing, but keep wandb_run_id.txt in each run dir"
+echo "or a future resume will start a new W&B run instead of continuing the existing one."
+if [[ ${#FAILED[@]} -gt 0 ]]; then
     echo
-    echo "synced. markers written:"
-    find "$SEARCH_ROOT" -name "*.wandb.synced" 2>/dev/null | wc -l
-    echo "offline dirs are safe to delete AFTER syncing, but keep wandb_run_id.txt in each run dir"
-    echo "or a future resume will start a new W&B run instead of continuing the existing one."
-else
-    echo "sync FAILED" >&2
+    echo "${#FAILED[@]} run(s) failed and were skipped (not blocking the rest):" >&2
+    printf '  %s\n' "${FAILED[@]}" >&2
     exit 1
 fi
