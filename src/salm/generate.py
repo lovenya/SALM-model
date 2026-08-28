@@ -326,6 +326,27 @@ def main() -> int:
                          "--oracle-align vectors and, for --mode a2s with a 'clapseq' "
                          "checkpoint, has no other effect since generation always uses the "
                          "live CLAP tower")
+    # 2026-08-27: the first NON-oracle use of Rank 2's content cross-attention (see
+    # src/salm/a2s/content_adapter.py). Training only ever saw the TARGET speech's own
+    # content (unavailable here, by construction) -- at generation time we substitute a
+    # retrieval guess: find the closest TRAINING row by ambient-CLAP similarity, and reuse
+    # THAT row's speech content instead. Not the oracle's content, and not learned from
+    # ambient audio directly, but the cheapest real (non-cheating) content source available
+    # without training a new predictor from scratch.
+    ap.add_argument("--use-content-xattn", action="store_true",
+                    help="a2s only: --checkpoint must be a Rank-2 (use_content_xattn=true) "
+                         "checkpoint. Installs the same cross-attention adapter before "
+                         "loading its weights, then feeds each row a retrieval-based "
+                         "content sequence (see --content-retrieval-root)")
+    ap.add_argument("--ctc-checkpoint", default=None,
+                    help="required with --use-content-xattn: the frozen CTC probe whose "
+                         "encoder produces the content sequence (same checkpoint the "
+                         "Rank-2 training run used)")
+    ap.add_argument("--content-retrieval-root", default=None,
+                    help="required with --use-content-xattn: root of the precomputed A2S "
+                         "conditioning cache for the TRAIN split (default: "
+                         "OUTPUTS_ROOT/features_a2s_cond) -- its cond_seq.npy, mean-pooled, "
+                         "is the retrieval database of ambient scenes to match against")
     args = ap.parse_args()
 
     if args.mode in ("s2a", "a2s", "b0") and not args.checkpoint:
@@ -334,6 +355,13 @@ def main() -> int:
     if args.oracle_align != "none" and args.mode != "a2s":
         log(f"ERROR: --oracle-align is a2s-only, got --mode {args.mode}")
         return 1
+    if args.use_content_xattn:
+        if args.mode != "a2s":
+            log(f"ERROR: --use-content-xattn is a2s-only, got --mode {args.mode}")
+            return 1
+        if not args.ctc_checkpoint:
+            log("ERROR: --use-content-xattn requires --ctc-checkpoint")
+            return 1
 
     out_dir = Path(args.out_dir)
     (out_dir / "audio").mkdir(parents=True, exist_ok=True)
@@ -380,6 +408,36 @@ def main() -> int:
         log(f"    oracle conditioning ACTIVE: align_{args.oracle_align}, "
             f"{len(oracle_by_id)} vectors from {oracle_file}")
 
+    # Retrieval database for --use-content-xattn: mean-pool the TRAIN split's already-cached
+    # CLAP sequence (no new precompute needed -- scripts/a2s/precompute_a2s_conditioning.py
+    # already wrote this for training) into one 768-d "scene key" per row, so a query's own
+    # mean-pooled scene can be matched by cosine similarity at generation time.
+    retrieval_keys = retrieval_speech_files = None
+    if args.use_content_xattn:
+        retrieval_root = Path(
+            args.content_retrieval_root or (project_paths.OUTPUTS_ROOT / "features_a2s_cond")
+        )
+        train_cond_dir = retrieval_root / "train"
+        train_index_file = project_paths.FEATURES_ROOT / "a2s" / "train" / "index.jsonl"
+        if not (train_cond_dir / "cond_seq.npy").exists() or not train_index_file.exists():
+            log(f"ERROR: --use-content-xattn needs {train_cond_dir / 'cond_seq.npy'} and "
+                f"{train_index_file}. Run scripts/a2s/precompute_a2s_conditioning.py and "
+                f"scripts/precompute_latents.py --direction a2s --target speech --split train.")
+            return 1
+        train_seq = np.load(train_cond_dir / "cond_seq.npy", mmap_mode="r")  # (N, 32, 768)
+        retrieval_keys = torch.from_numpy(
+            np.asarray(train_seq.mean(axis=1), dtype=np.float32)
+        )
+        retrieval_keys = F.normalize(retrieval_keys, dim=-1)
+        retrieval_speech_files = [
+            json.loads(l)["speech_file"] for l in train_index_file.read_text().splitlines() if l
+        ]
+        if len(retrieval_speech_files) != retrieval_keys.shape[0]:
+            log(f"ERROR: {train_index_file} has {len(retrieval_speech_files)} rows but "
+                f"cond_seq.npy has {retrieval_keys.shape[0]} -- caches out of sync.")
+            return 1
+        log(f"    content retrieval bank: {len(retrieval_speech_files)} training scenes")
+
     dtype = torch.float16 if args.device.startswith("cuda") else torch.float32
     log("Loading AudioLDM ...")
     pipe = load_pipeline(args.device, dtype)
@@ -390,10 +448,34 @@ def main() -> int:
     # b0 loads the same checkpoint as s2a: it needs the conditioner for its learned null
     # embedding, and it must use the SAME U-Net, because B0 is the floor for THIS model rather
     # than a generic unconditional sample.
+    ctc_head = content_extractor = None
     if args.mode in ("s2a", "a2s", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
         checkpoint_epoch = payload.get("epoch")
+        if args.use_content_xattn:
+            # MUST install the adapter's to_k_ip/to_v_ip submodules BEFORE loading the
+            # checkpoint's unet weights -- load_trained_unet uses strict=False, so on a
+            # vanilla (un-adapted) U-Net it would silently DROP every adapter weight as
+            # "unexpected" instead of loading it, and generation would run as if Rank 2 had
+            # never been trained. Same device-placement fix as training (afb41d7): the new
+            # submodules are constructed on CPU and never moved until this explicit .to().
+            from salm.a2s.content_adapter import install_content_cross_attention
+            from salm.a2s.ctc_probe import SimpleCTCASR
+            from salm.data.frontend import MelConfig, MelExtractor
+
+            log(f"    loading frozen CTC probe from {args.ctc_checkpoint} ...")
+            ctc_head = SimpleCTCASR().to(args.device).eval()
+            ctc_payload = torch.load(args.ctc_checkpoint, map_location=args.device, weights_only=False)
+            ctc_head.load_state_dict(ctc_payload["model"])
+            for p in ctc_head.parameters():
+                p.requires_grad_(False)
+            content_extractor = MelExtractor(MelConfig(norm_mode="none"), device=args.device)
+
+            adapted = install_content_cross_attention(pipe.unet, content_dim=ctc_head.encoder_dim)
+            pipe.unet.to(args.device)
+            log(f"    installed content cross-attention on {len(adapted)} attn2 layers "
+                f"(content_dim={ctc_head.encoder_dim})")
         if args.skip_unet_weights:
             log("    --skip-unet-weights: keeping the PRETRAINED U-Net (ablation baseline)")
         else:
@@ -408,6 +490,7 @@ def main() -> int:
 
     for start in range(0, len(rows), args.batch_size):
         batch = rows[start : start + args.batch_size]
+        content_seq = None  # only the real (non-oracle) a2s branch below ever sets this
 
         # ---------------------------------------------- build the condition vector
         if args.mode == "b0":
@@ -460,6 +543,30 @@ def main() -> int:
                 negative = conditioner.null_condition(
                     len(batch), torch.device(args.device)
                 )
+
+                if args.use_content_xattn:
+                    # RETRIEVAL, not the oracle's own content: the ambient scene has no
+                    # words to begin with, so there is no "ground truth" content sequence
+                    # for it, unlike training (which peeked at the target speech). This
+                    # substitutes the content of the most acoustically-similar TRAINING
+                    # scene instead -- a real, honest guess derivable from the input alone,
+                    # not a shortcut past the actual problem.
+                    m = mask.unsqueeze(-1).to(feats.dtype)
+                    query_key = (feats * m).sum(1) / m.sum(1).clamp(min=1.0)
+                    query_key = F.normalize(query_key.float(), dim=-1).cpu()
+                    sims = query_key @ retrieval_keys.T          # (b, N)
+                    best = sims.argmax(dim=1).tolist()
+                    matched_speech = [retrieval_speech_files[i] for i in best]
+
+                    content_wavs = [
+                        load_waveform_mono_16k(
+                            p, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left"
+                        )
+                        for p in matched_speech
+                    ]
+                    content_wav_t = torch.from_numpy(np.stack(content_wavs)).float().to(args.device)
+                    content_mel = content_extractor.batch(content_wav_t)
+                    content_seq = ctc_head.encode(content_mel)   # (b, 256, 512)
         else:
             wavs = [load_waveform_mono_16k(str(r.speech_path)) for r in batch]
             if args.degrade != "none":
@@ -488,6 +595,38 @@ def main() -> int:
         if negative is not None:
             negative = negative.to(dtype=pipe.unet.dtype)
 
+        # ------------------------------------- inject content, if this checkpoint has it
+        # AudioLDMPipeline.__call__ hardcodes `encoder_hidden_states=None` on every one of
+        # its own internal unet(...) calls (verified against installed diffusers source,
+        # pipeline_audioldm.py) -- there is no pipeline argument to pass it through. Rather
+        # than reimplement the pipeline's own (already correct) guidance/scheduling/decode
+        # loop by hand, wrap unet.forward for the duration of this one call, so every
+        # internal call the pipeline makes receives our content tuple instead of None, and
+        # everything else about the pipeline's tested behaviour is untouched. Restored
+        # immediately after, so a later batch without content-xattn is unaffected.
+        restore_forward = None
+        if content_seq is not None:
+            original_forward = pipe.unet.forward
+
+            def patched_forward(sample, timestep, encoder_hidden_states=None, **kwargs):
+                from salm.a2s.content_adapter import content_encoder_hidden_states
+
+                # `sample`'s batch dim is doubled to 2B under classifier-free guidance
+                # (torch.cat([latents]*2) inside the pipeline) -- match it here. Content is
+                # NEVER dropped for a "null" branch (training never saw a null-content
+                # variant either -- content_kwargs is always the real tuple, see
+                # train_ldm.py's diagnose()), so both halves get the identical content.
+                reps = sample.shape[0] // content_seq.shape[0]
+                seq = content_seq.repeat(reps, 1, 1) if reps > 1 else content_seq
+                return original_forward(
+                    sample, timestep,
+                    encoder_hidden_states=content_encoder_hidden_states(seq),
+                    **kwargs,
+                )
+
+            pipe.unet.forward = patched_forward
+            restore_forward = original_forward
+
         # ------------------------------------------------------------- sample
         with torch.no_grad():
             result = pipe(
@@ -498,6 +637,8 @@ def main() -> int:
                 guidance_scale=args.guidance_scale,
                 generator=generator,
             )
+        if restore_forward is not None:
+            pipe.unet.forward = restore_forward
         audios = result.audios
 
         for row, audio in zip(batch, audios):
