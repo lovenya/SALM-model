@@ -26,9 +26,9 @@
 #SBATCH --job-name=salm-a2s-xattn-gen
 #SBATCH --account=aip-ravanelm
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=64G
-#SBATCH --gpus-per-node=h100:1
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=480G
+#SBATCH --gpus-per-node=h100:4
 #SBATCH --time=00:30:00
 #SBATCH --output=/scratch/l/lovenya/salm_model_outputs/logs/slurm/%x-%j.out
 
