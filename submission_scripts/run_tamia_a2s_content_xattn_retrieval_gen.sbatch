@@ -37,26 +37,47 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source /scratch/l/lovenya/SALM-model/submission_scripts/_salm_env.sh
 
-CHECKPOINT="${CHECKPOINT:-$RUNS_ROOT/a2s_audioldm_clapseq_xformer/content_xattn_falsify_100ep/checkpoints/checkpoint_best.pt}"
+RUN_NAME="${RUN_NAME:-content_xattn_falsify_100ep}"
+CKPT_DIR="$RUNS_ROOT/a2s_audioldm_clapseq_xformer/$RUN_NAME/checkpoints"
 CTC_CKPT="${CTC_CKPT:-$OUTPUTS_ROOT/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt}"
 NUM_GEN="${NUM_GEN:-16}"
-OUT_DIR="${OUT_DIR:-$OUTPUTS_ROOT/generations/content_xattn_retrieval_$(TZ=America/Toronto date +%Y%m%d_%H%M)}"
+STAMP="$(TZ=America/Toronto date +%Y%m%d_%H%M)"
+OUT_ROOT="$OUTPUTS_ROOT/generations/content_xattn_retrieval_${STAMP}"
 
-for f in "$CHECKPOINT" "$CTC_CKPT"; do
-    [[ -f "$f" ]] || { echo "MISSING: $f" >&2; exit 1; }
+# Every saved checkpoint, not just "best" -- 2026-08-29 correction: "best" is picked by
+# val_clap_r1, which peaks EARLY (epoch 8 here) and has nothing to do with content-xattn's
+# own signal (val_x0_rel_mse), which kept improving past epoch 90. Generating from only one
+# epoch answers "does this ONE snapshot sound different", not "does the mechanism improve
+# with training" -- the actual question. STANDING POLICY GOING FORWARD: every checkpoint-
+# comparison generation job covers the full saved spread (first, every ~20 epochs, last,
+# best), not a single pick, in ONE job -- this is cheap (14s/16 samples measured) compared
+# to the queue-wait cost of finding out later that one epoch wasn't enough to judge by.
+[[ -f "$CTC_CKPT" ]] || { echo "MISSING: $CTC_CKPT" >&2; exit 1; }
+CKPTS=()
+for name in checkpoint_ep19.pt checkpoint_ep39.pt checkpoint_ep59.pt checkpoint_ep79.pt \
+            checkpoint_ep99.pt checkpoint_last.pt checkpoint_best.pt; do
+    [[ -f "$CKPT_DIR/$name" ]] && CKPTS+=("$name")
 done
+[[ ${#CKPTS[@]} -gt 0 ]] || { echo "MISSING: no checkpoints found in $CKPT_DIR" >&2; exit 1; }
+echo "checkpoints to generate from: ${CKPTS[*]}"
 
-salm_print_header "First real (retrieval-content) generation from Rank 2, n=$NUM_GEN"
+salm_print_header "Content-xattn retrieval generation across ${#CKPTS[@]} checkpoints, n=$NUM_GEN each"
 
-python -m salm.generate --mode a2s --direction a2s \
-    --checkpoint "$CHECKPOINT" \
-    --use-content-xattn --ctc-checkpoint "$CTC_CKPT" \
-    --split val --num-samples "$NUM_GEN" \
-    --out-dir "$OUT_DIR" --copy-reference \
-    2>&1 | tee "$OUT_DIR.log"
+for name in "${CKPTS[@]}"; do
+    tag="${name%.pt}"
+    out_dir="$OUT_ROOT/$tag"
+    echo
+    echo "=== $tag ==="
+    python -m salm.generate --mode a2s --direction a2s \
+        --checkpoint "$CKPT_DIR/$name" \
+        --use-content-xattn --ctc-checkpoint "$CTC_CKPT" \
+        --split val --num-samples "$NUM_GEN" \
+        --out-dir "$out_dir" --copy-reference \
+        2>&1 | tee "$out_dir.log"
+done
 
 echo
 echo "=========================================================="
-echo "listen: $OUT_DIR/audio/   (<id>.wav = generated, <id>__reference.wav = real target)"
+echo "listen: $OUT_ROOT/<checkpoint_tag>/audio/   (<id>.wav = generated, <id>__reference.wav = real target)"
 echo "compare against: $RUNS_ROOT/a2s_audioldm_clapseq_xformer/probe40_A1_o2/generations/a2s_best/audio/"
 echo "=========================================================="

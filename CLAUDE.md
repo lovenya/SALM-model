@@ -44,6 +44,14 @@ Read-only Slurm inspection is always fine: `squeue`, `sacct`, `sinfo`, `sshare`,
   separate smoke failures in this repo were guessed-at library signatures that a two-minute
   read of `site-packages` would have caught.
 - Heavy artifacts live in `/scratch/l/lovenya/salm_model_outputs`, never in git.
+- **Checkpoint-comparison generation jobs cover the full saved epoch spread, not one pick.**
+  "best" is picked by whatever `select_metric` the run used (often `val_clap_r1`), which can
+  peak early and has no necessary relationship to the thing actually being tested that job
+  (e.g. Rank 2's content-xattn signal, which lives in `val_x0_rel_mse` and kept improving
+  long after `val_clap_r1` peaked). One epoch answers "does this snapshot sound different",
+  not "does the mechanism improve with training". Generate from every saved checkpoint
+  (first, every ~20 epochs, last, best) in one job -- cheap (~15s/16 samples measured) next
+  to the cost of a whole extra queue wait to discover one epoch wasn't enough to judge by.
 
 ## HARD RULE: every job gets an expected-results writeup before/at submission
 
