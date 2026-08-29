@@ -618,6 +618,13 @@ def main() -> int:
                 # train_ldm.py's diagnose()), so both halves get the identical content.
                 reps = sample.shape[0] // content_seq.shape[0]
                 seq = content_seq.repeat(reps, 1, 1) if reps > 1 else content_seq
+                # to_k_ip/to_v_ip were cast to the pipeline's working dtype (fp16 on cuda)
+                # by load_trained_unet's pipe.unet.to(dtype); the content sequence itself
+                # came from the CTC probe, which is never cast and stays fp32. Match
+                # `sample`'s dtype (the actual dtype every other tensor in this forward
+                # call is already using) rather than hardcoding fp16, so this also works
+                # unchanged on CPU (--device cpu, dtype=float32).
+                seq = seq.to(dtype=sample.dtype)
                 return original_forward(
                     sample, timestep,
                     encoder_hidden_states=content_encoder_hidden_states(seq),
