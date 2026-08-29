@@ -66,6 +66,14 @@ salm_print_header "Content-xattn retrieval generation across ${#CKPTS[@]} checkp
 for name in "${CKPTS[@]}"; do
     tag="${name%.pt}"
     out_dir="$OUT_ROOT/$tag"
+    # 2026-08-29: `tee "$out_dir.log"` needs $OUT_ROOT to already exist, but that directory
+    # was only ever created as a side effect of generate.py's OWN internal mkdir -- a real
+    # race between tee (starts trying to open its file immediately) and python (takes
+    # several seconds to even reach that mkdir call). Confirmed: checkpoint_ep19 generated
+    # 16 real wavs correctly, but tee failed to open its file since $OUT_ROOT didn't exist
+    # yet, and with pipefail+set-e that non-zero tee exit killed the whole script right
+    # after -- never even attempting the other 6 checkpoints. mkdir here removes the race.
+    mkdir -p "$out_dir"
     echo
     echo "=== $tag ==="
     python -m salm.generate --mode a2s --direction a2s \
