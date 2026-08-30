@@ -777,7 +777,12 @@ def main() -> int:
                     # or the very first conv fails.
                     from salm.a2s.content_concat import concat_content
 
-                    cmap = content_projector(seq).to(dtype=sample.dtype)
+                    # `seq` was cast to sample.dtype (fp16 on cuda) above for the
+                    # IP-Adapter path, but the projector's own weights are fp32 -- it is
+                    # rebuilt from the checkpoint and never passed through
+                    # pipe.unet.to(dtype). Run it in fp32 and cast the RESULT, which also
+                    # avoids fp16 rounding inside the projection itself.
+                    cmap = content_projector(seq.float()).to(dtype=sample.dtype)
                     return original_forward(
                         concat_content(sample, cmap), timestep,
                         encoder_hidden_states=None, **kwargs,
