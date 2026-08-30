@@ -705,6 +705,7 @@ def main() -> int:
             f"(content_dim={ctc_head.encoder_dim}): {adapted}")
 
     content_projector = None
+    content_conv_weight = None
     if cfg.use_content_concat:
         if cfg.use_content_xattn:
             raise SystemExit(
@@ -715,6 +716,11 @@ def main() -> int:
         if cfg.direction != "a2s":
             raise SystemExit("use_content_concat is A2S-only (the oracle content source is "
                              "the TARGET SPEECH, which only exists for a2s).")
+        if cfg.freeze_unet:
+            raise SystemExit(
+                "use_content_concat requires freeze_unet=false: the zero-initialized conv_in "
+                "content slice must learn before any signal can reach the U-Net"
+            )
         if not cfg.ctc_checkpoint:
             raise SystemExit("use_content_concat requires ctc_checkpoint (the frozen encoder "
                              "that produces the content sequence).")
@@ -742,7 +748,18 @@ def main() -> int:
             n_freq=int(train_ds.latent_shape[-1]),
             mode=cfg.content_concat_mode,
         ).to(device)
-        widen_conv_in(unet, cfg.content_concat_channels)
+        widened_conv = widen_conv_in(unet, cfg.content_concat_channels)
+        content_conv_weight = widened_conv.weight
+        # The pretrained first eight input slices must retain their ordinary U-Net starting
+        # point, while the new zero-init content slices need the adapter LR. A gradient hook
+        # freezes only the pretrained slice; the new slice is placed with the projector in
+        # the lr_content optimizer group below.
+        def _freeze_pretrained_conv_slice(grad: torch.Tensor) -> torch.Tensor:
+            grad = grad.clone()
+            grad[:, :8].zero_()
+            return grad
+
+        content_conv_weight.register_hook(_freeze_pretrained_conv_slice)
         unet = unet.to(device)   # the widened conv_in is constructed on CPU
         n_proj = sum(prm.numel() for prm in content_projector.parameters())
         log(f"    content CONCAT active: +{cfg.content_concat_channels} input channels "
@@ -792,16 +809,23 @@ def main() -> int:
         {"params": [p for p in conditioner.parameters() if p.requires_grad], "lr": cfg.lr_conditioner}
     ]
     if not cfg.freeze_unet:
+        excluded = {id(content_conv_weight)} if content_conv_weight is not None else set()
         param_groups.append(
-            {"params": [p for p in unet.parameters() if p.requires_grad], "lr": cfg.lr_unet}
+            {"params": [p for p in unet.parameters()
+                        if p.requires_grad and id(p) not in excluded], "lr": cfg.lr_unet}
         )
     if content_projector is not None:
         # Its own LR group: these are from-scratch weights, and lr_unet (1e-5) is calibrated
         # for PRETRAINED ones. IP-Adapter's reference recipe trains its adapter at 1e-4.
-        param_groups.append(
-            {"params": [p for p in content_projector.parameters() if p.requires_grad],
-             "lr": cfg.lr_content}
-        )
+        content_params = [p for p in content_projector.parameters() if p.requires_grad]
+        content_params.append(content_conv_weight)
+        param_groups.append({
+            "params": content_params,
+            "lr": cfg.lr_content,
+            # Preserve the frozen pretrained conv slice exactly; AdamW decay would change
+            # it even when its gradient slice is zero.
+            "weight_decay": 0.0,
+        })
     optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
 
     steps_per_epoch = len(train_loader)
@@ -847,6 +871,8 @@ def main() -> int:
         cond: torch.Tensor | None = None,
         return_extras: bool = False,
         content_roll: int = 0,
+        posterior_noise: torch.Tensor | None = None,
+        diffusion_noise: torch.Tensor | None = None,
     ):
         """
         AudioLDM's objective: MSE between predicted and true noise in latent space.
@@ -864,10 +890,12 @@ def main() -> int:
         std = batch["latent_std"].to(device, non_blocking=True)
 
         # Sample from the VAE posterior, then apply the scaling factor, as AudioLDM does.
-        latents = mean + std * torch.randn_like(std)
+        if posterior_noise is None:
+            posterior_noise = torch.randn_like(std)
+        latents = mean + std * posterior_noise
         latents = latents * train_ds.vae_scaling_factor
 
-        noise = torch.randn_like(latents)
+        noise = torch.randn_like(latents) if diffusion_noise is None else diffusion_noise
         bsz = latents.shape[0]
         if timesteps is None:
             timesteps = torch.randint(
@@ -933,6 +961,7 @@ def main() -> int:
                 # detectable here at epoch 3 from a validation pass instead of after a
                 # whole generation job and a listening session.
                 content_seq = torch.roll(content_seq, shifts=content_roll, dims=1)
+            keep = None
             if train and cfg.content_dropout_prob > 0.0:
                 # Independent per-row dropout to a ZERO content map, following IP-Adapter's
                 # 5% condition dropout and InstructPix2Pix's independent per-condition
@@ -941,8 +970,12 @@ def main() -> int:
                 # can be classifier-free guided at inference -- which it currently cannot.
                 keep = (torch.rand(content_seq.shape[0], device=device)
                         >= cfg.content_dropout_prob).float()
-                content_seq = content_seq * keep[:, None, None]
             content_map = content_projector(content_seq.to(noisy.dtype))
+            if keep is not None:
+                # Drop AFTER projection as a second line of defence: even if a future
+                # projector gains a bias or normalization offset, a dropped row remains an
+                # exact zero map and therefore a genuine null-content branch.
+                content_map = content_map * keep[:, None, None, None]
             unet_input = concat_content(noisy, content_map)
 
         pred = unet(
@@ -1170,8 +1203,23 @@ def main() -> int:
             with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
                 cond = compute_condition(batch)
 
+                matched_kwargs = {}
+                if cfg.use_content_concat:
+                    # Correct and rolled content MUST share posterior sample, diffusion
+                    # noise, and timesteps. Otherwise their x0 difference is dominated by
+                    # resampling rather than content binding (the same confound diagnose()
+                    # already avoids for D1/D2).
+                    latent_std = batch["latent_std"].to(device, non_blocking=True)
+                    matched_kwargs = {
+                        "posterior_noise": torch.randn_like(latent_std),
+                        "diffusion_noise": torch.randn_like(latent_std),
+                        "timesteps": torch.randint(
+                            0, noise_scheduler.config.num_train_timesteps,
+                            (n,), device=device,
+                        ).long(),
+                    }
                 loss, extras = diffusion_loss(
-                    batch, train=False, cond=cond, return_extras=True
+                    batch, train=False, cond=cond, return_extras=True, **matched_kwargs
                 )
                 total += loss.item() * n
                 count += n
@@ -1181,10 +1229,10 @@ def main() -> int:
                     # Binding probe: same batch, same cond, content shifted 64 frames
                     # (~2.6 s at 25 fps) along time. Only meaningful when a content channel
                     # exists, so it costs nothing on every other run.
-                    if cfg.use_content_concat or cfg.use_content_xattn:
+                    if cfg.use_content_concat:
                         _, rex = diffusion_loss(
                             batch, train=False, cond=cond, return_extras=True,
-                            content_roll=64,
+                            content_roll=64, **matched_kwargs,
                         )
                         if "x0_rel_mse" in rex:
                             x0_roll_sum += rex["x0_rel_mse"].item() * n

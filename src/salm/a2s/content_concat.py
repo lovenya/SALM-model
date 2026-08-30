@@ -68,6 +68,7 @@ class ContentProjector(nn.Module):
         extra_channels: int = 8,
         n_freq: int = 16,
         mode: str = "broadcast",
+        bias: bool = False,
     ) -> None:
         super().__init__()
         if mode not in ("broadcast", "full"):
@@ -76,7 +77,13 @@ class ContentProjector(nn.Module):
         self.extra_channels = extra_channels
         self.n_freq = n_freq
         out = extra_channels if mode == "broadcast" else extra_channels * n_freq
-        self.proj = nn.Linear(content_dim, out)
+        # No bias: an all-zero content sequence must map to an EXACTLY zero condition.
+        # This is required by both training-time content dropout and the `zero` generation
+        # control. With nn.Linear's default learned bias, "zero content" silently becomes a
+        # learned constant content map and is not a null branch at all.
+        # `bias` exists only for backward compatibility: checkpoints trained before
+        # 2026-08-30 used nn.Linear's default learned bias. Load those with bias=True.
+        self.proj = nn.Linear(content_dim, out, bias=bias)
 
     def forward(self, content_seq: torch.Tensor) -> torch.Tensor:
         b, t, _ = content_seq.shape

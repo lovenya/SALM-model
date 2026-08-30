@@ -536,9 +536,14 @@ def main() -> int:
                 # extra in "broadcast" mode.
                 out_features = payload["content_projector"]["proj.weight"].shape[0]
                 n_freq = 16 if pmode == "broadcast" else out_features // extra
+                # Older checkpoints (pre-2026-08-30) trained the projector with
+                # nn.Linear's default learned bias; newer ones use bias=False so that zero
+                # content maps to an exactly-zero condition. Match whichever this one is,
+                # rather than failing on an unexpected/missing key.
+                had_bias = "proj.bias" in payload["content_projector"]
                 content_projector = ContentProjector(
                     content_dim=ctc_head.encoder_dim, extra_channels=extra,
-                    n_freq=n_freq, mode=pmode,
+                    n_freq=n_freq, mode=pmode, bias=had_bias,
                 ).to(args.device)
                 proj_state = payload["content_projector"]
                 if "proj.bias" in proj_state:

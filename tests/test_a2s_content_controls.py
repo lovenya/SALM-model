@@ -28,6 +28,16 @@ class ContentControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two"):
             deranged_indices(1, 123)
 
+    def test_zero_content_projects_to_exact_zero(self):
+        from salm.a2s.content_concat import ContentProjector
+
+        for mode in ("broadcast", "full"):
+            projector = ContentProjector(12, extra_channels=3, n_freq=5, mode=mode)
+            out = projector(torch.zeros(2, 7, 12))
+            self.assertEqual(tuple(out.shape), (2, 3, 7, 5))
+            self.assertTrue(torch.equal(out, torch.zeros_like(out)))
+            self.assertIsNone(projector.proj.bias)
+
 
 class ClapLoaderTests(unittest.TestCase):
     def _fake_transformers(self):
