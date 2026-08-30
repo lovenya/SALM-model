@@ -70,3 +70,64 @@ reasoned about independently, not just "set eval and requires_grad=False and mov
 
 (Caught in: SALM-model, 2026-08-26, wiring a frozen CTC head into a diffusion training loop for
 a content-supervision loss — see `docs/EXPERIMENT_LOG.md` 2026-08-26 for the full story.)
+
+## `from_pretrained` on the wrong class can silently give you a randomly-initialized model
+
+**The bug.** A checkpoint published as `ClapModel` stores audio weights under
+`audio_model.audio_encoder.*`. Loading it through `ClapAudioModel.from_pretrained(...)` --
+which expects `audio_encoder.*` -- does not raise. HuggingFace reports the checkpoint's keys
+as UNEXPECTED, reports the model's own keys as MISSING, initializes them fresh, and returns a
+**perfectly runnable model with random weights**.
+
+**Why it survived for a week.** The warning is printed, but it looks exactly like the routine
+head-mismatch noise you see whenever you load a base checkpoint into a task model
+("MISSING: those params were newly initialized because missing from the checkpoint. Consider
+training on your downstream task"). In our case it was 33 lines of it, buried in a job log, and
+read past repeatedly.
+
+Worse, one code path accidentally worked: a precompute script constructed the wrapper and then
+**overwrote** `.audio_model` with a correctly-loaded tower, so the cached features were right.
+Only the second code path -- generation -- used the broken constructor. Training metrics
+therefore looked completely normal while every generated sample was conditioned on noise.
+
+**The general lesson.** In PyTorch/HF, "it loaded and it runs" is not evidence that weights
+were loaded. `strict=False` semantics are pervasive: `from_pretrained` across mismatched
+classes, `load_state_dict(..., strict=False)`, and adapter installs that must happen *before*
+a load or get silently dropped as unexpected keys.
+
+**What to actually do:**
+1. **Never let a load warning scroll past unexamined.** If a load prints MISSING keys for
+   anything other than a task head you intend to train, treat it as an error.
+2. **Assert a numeric invariant, not the absence of an exception.** Our fix added a
+   fail-fast parity check: encode a handful of files live, compare against the cached
+   features, require cosine > 0.999 and rank-1 self-retrieval. It runs before every
+   generation job and would have caught this on day one.
+3. **Suspect any component that exists on two code paths.** The one where a bug hides is the
+   one nobody looks at -- here, the path where the object was constructed and used directly
+   rather than being patched up afterwards.
+
+## A checkpoint selector that measures the wrong component silently ruins every downstream result
+
+`select_metric: val_clap_r1` scored the *conditioner's* retrieval accuracy. The question the
+project actually cared about was whether the *U-Net* could render intelligible speech. Those
+are different components, and their curves have different shapes: retrieval peaked at epoch
+2-8 and then declined for the rest of every run, while the U-Net's own reconstruction error
+kept improving to epoch ~92.
+
+So `checkpoint_best` was **always** a near-untrained renderer -- epoch 6, 6, 3, 2, 4 across
+five runs -- and every listening test, every generation comparison, and the single ablation
+that redirected the entire research programme were all run on models that had barely trained.
+Nothing errored. The numbers all looked plausible.
+
+**The lesson:** your model-selection metric silently defines what "the model" means for every
+downstream artifact. Before trusting any generated output, check which epoch produced it and
+whether the metric that chose it is causally connected to the property you are judging. A
+metric can be perfectly valid (`val_clap_r1` genuinely measured the conditioner) and still be
+the wrong selector.
+
+**Corollary that cost us weeks:** when adding a new mechanism, add a metric that is *sensitive
+to that mechanism* in the same commit. We added a content channel and judged it with metrics
+computed from the conditioner's output, which the channel never touches. The metric we
+eventually needed -- roll the conditioning sequence along time and check whether the loss gets
+worse -- is ~20 lines, runs in validation, and would have falsified the mechanism at epoch 3
+instead of after two training runs, a generation job, and a listening session.

@@ -1807,3 +1807,188 @@ source audio—but doing so means implementing and validating a rectified-flow f
 not invoking an official trainer. The actionable ladder is UNISON first, UniFlow-Audio second,
 then Audio-Omni after a released-checkpoint inference/round-trip gate. JEPA remains an auxiliary
 shared-memory objective, not a waveform generator or a justified “world model” on static pairs.
+
+## 2026-08-30b: two invalidating bugs found, then the first mechanism that actually binds content
+
+The most consequential day of the A2S investigation. Two independent defects invalidated
+almost every prior A2S conclusion; fixing them produced the first clean measurement, which
+falsified cross-attention; and the replacement mechanism works on its own metric.
+
+### Defect 1: the live CLAP tower was RANDOMLY INITIALIZED at generation time
+
+`laion/clap-htsat-unfused` is a **ClapModel** checkpoint -- its audio weights are prefixed
+`audio_model.audio_encoder.*` (verified: 447 tensors, 236 under `audio_model`).
+`ClapAudioSequenceEncoder` loaded it via `ClapAudioModel.from_pretrained`, which expects
+`audio_encoder.*`. The prefixes do not reconcile, so **every tower weight was reported
+UNEXPECTED (checkpoint side) / MISSING (model side) and silently newly-initialized**, while
+still returning a runnable model.
+
+`precompute_a2s_conditioning.py` accidentally escaped this by overwriting
+`encoder.audio_model` with `ClapModel(...).audio_model` after construction -- so the TRAINING
+cache is correct and all training metrics stand. Generation builds the encoder through
+`architectures._build_clap_encoder`, which has no such override, so **every `--mode a2s`
+generation ever produced was conditioned on features from an untrained network.**
+
+The evidence was printed in our own logs the whole time (`salm-a2s-xattn-gen-432088.out`
+lines ~95-138: 33 `MISSING audio_encoder.*` entries, each annotated "newly initialized") and
+was read past as routine loader noise. Fixed in `37b5ea9`; a fail-fast parity check now runs
+before generation and reports live-vs-cache cosine **0.9999988**, self-retrieval rank-1 on
+every row.
+
+### Defect 2: every A2S conclusion came from an epoch 2-6 checkpoint
+
+`select_metric: val_clap_r1` scores the CONDITIONER's retrieval and never touches the
+U-Net's rendering. Measured, it peaks at epoch 2-8 on every A2S run and then declines, so
+`checkpoint_best` was always a near-untrained renderer. From the generations' own
+`summary.json`:
+
+| lane | epoch | of |
+|---|---|---|
+| **oracle ablation (2026-08-24b)** | **6** | 40 |
+| probe40_A1_o2 | 6 | 40 |
+| probe40_A0_plain | 3 | 40 |
+| probe40_A2_o2_infonce | 2 | 40 |
+| probe40_A3_o2_ctc | 4 | 40 |
+
+Meanwhile `val_x0_rel_mse` -- which does reflect rendering -- kept improving for the full 100
+epochs. **The oracle result that motivated the entire content-channel programme was measured
+on an epoch-6 U-Net.** Changed to `select_metric: val_x0_rel_mse` in `f8826de`.
+
+Everything else was audited and is CLEAN: VAE scaling consistent end-to-end, latent shapes
+match, `class_labels` normalization symmetric on both paths, scheduler/prediction_type agree,
+left-crop verified in the latents (0.776 first/second-half asymmetry vs S2A's 1.045), row
+alignment enforced, adapter weights genuinely trained, and `lr_unet=1e-5` demonstrably
+sufficient (the working S2A model used it at epoch 75).
+
+### The metric was never calibrated -- and once calibrated, it is sound
+
+`score_intelligibility.py` pre-registers a real-speech control that had never been built or
+run. Job 432436 finally built it:
+
+| lane | inter-ASR distance |
+|---|---|
+| **real speech (floor)** | **0.3146** |
+| **VAE round-trip (ceiling for this stack)** | **0.3624** |
+| every generated lane | **0.944 - 0.990** |
+
+Three conclusions at once. (1) The metric is NOT saturated -- it separates real speech from
+our output by 0.63. The earlier "flat across all variants" readings were honest. (2) The
+stack can render speech: the VAE round-trip costs only 0.05, independently confirming the
+2026-08-23 gate (WER 6.27% -> 5.64% through the full VAE+vocoder path). **The achievable
+target is ~0.36 and we sit at ~0.95; that gap is the entire problem.** (3) It gives every
+future result a floor to be read against.
+
+### Job 432420: cross-attention does not bind content IDENTITY
+
+First methodologically clean A2S test: 4 content sources (oracle / retrieval / shuffled /
+zero) x 6 checkpoints, matched rows, seeds and sampler settings, encoder bug fixed, epoch-99
+checkpoint. Result, by ear **and** by metric:
+
+| content at ep99 | inter-ASR dist | RMS |
+|---|---|---|
+| oracle (perfect, = training condition) | 0.9641 | 0.0717 |
+| shuffled (deliberately wrong) | 0.9471 | 0.0747 |
+| retrieval | 0.9441 | 0.0728 |
+| zero (none) | 0.9790 | 0.0893 |
+
+**Oracle and shuffled are indistinguishable; only `zero` differs.** Perfect content buys
+nothing over deliberately-wrong content. The IP-Adapter branch registers content PRESENCE
+but not content IDENTITY -- which is exactly why it improved `val_x0_rel_mse` 0.371 -> 0.330
+while never producing an intelligible word.
+
+**The mechanism, verified in installed source.** `Transformer2DModel` flattens the latent to
+`(B, H*W, C)` tokens with **no positional embedding**, and `IPAdapterAttnProcessor2_0` adds
+none to `ip_hidden_states` either. The IP branch therefore computes `softmax(q.K^T)V` over
+256 content vectors treated as an **unordered set**. Nothing in that operation can express
+"content frame t belongs to latent frame t". A time-permutation of the content provably does
+not change the output -- so it can only ever extract a bag-level summary.
+
+### The fix: frame-aligned channel concatenation (and it binds)
+
+Every modern speech generator injects content as a FRAME-ALIGNED sequence concatenated onto
+the model input, not by cross-attention: F5-TTS (verified locally at
+`f5_tts/model/backbones/dit.py:162`, `torch.cat((x, cond, text_embed), dim=-1)`), E2-TTS,
+VoiceBox (forced-aligned phones), NaturalSpeech 2 (length-expanded phonemes). Cross-attention
+appears only where the sequence has ALREADY been made frame-aligned (VoiceLDM's durator,
+AudioLDM 2's LOA tokens). **The invariant is frame alignment, not the concat-vs-attention
+choice.**
+
+And we are in the best case for it: AudioLDM's mel is 1024 frames / 10.24 s (100 fps), the
+VAE downsamples time 4x, so the latent (8, 256, 16) runs at exactly **25 fps** -- and
+`SimpleCTCASR.encode()` returns exactly **256** frames. Content frame t and latent frame t are
+the same 40 ms of the same waveform. F5 fakes this with left-packed filler tokens; we have it
+exactly, for free.
+
+Built in `209e8cb` / `656816d` (`src/salm/a2s/content_concat.py`): project the content
+sequence to a latent-shaped map, concatenate on the CHANNEL axis, widen `conv_in` 8 -> 16 with
+pretrained weights copied into `[:, :8]` and the new channels **zero-initialized** (so step 0
+is bit-identical to baseline -- the trick SD's inpainting checkpoint used for 4 -> 9). Note
+zero-init must be on `conv_in`, NOT the projector: zeroing the projector would make both
+`dL/dW_new` and the content map identically zero and the channel would be permanently dead.
+
+`content_concat_mode: full` rather than `broadcast`, on an algebraic argument: with broadcast,
+content channels are constant along frequency, so `conv_in`'s 3x3 kernel yields a contribution
+provably **constant in f** for every interior bin -- the entire first-layer message is a
+per-time scalar field of rank <= 8. Phoneme identity is primarily formant structure, i.e. a
+frequency-distribution fact, so broadcast structurally cannot inject what distinguishes
+phonemes. `full` gives 8x16 = 128 numbers per frame, matching the latent's own 128.
+
+### val_content_bind_gap: the metric that should have existed from the start
+
+Scores `val_x0_rel_mse` twice per validation -- once with correct content, once with content
+ROLLED 64 frames (~2.6 s) along time, target latent untouched. If the model binds content
+frame t to latent frame t, rolling must hurt. **This would have caught the Rank-2 failure at
+epoch 3 instead of after a generation job and a listening session.** Logged per epoch as
+`bind=`, free on runs without a content channel.
+
+### Job 432493 (content_concat_v2, 100 epochs): IT BINDS
+
+| epoch | bind | val_x0_rel_mse |
+|---|---|---|
+| 00 | +0.0087 | 0.3601 |
+| 01 | +0.0499 | 0.3528 |
+| 03 | +0.1046 | 0.3727 |
+| 83 | **+0.3271** (best) | — |
+| 91 | +0.3061 | **0.2884** (best) |
+| 99 | +0.3172 | 0.2951 |
+
+`bind` climbs monotonically from ~0 (as it must, zero-init) to **+0.33** -- a ~37x effect,
+not noise. Time-shifting the content now substantially damages the prediction, so **the model
+genuinely uses content frame t to predict latent frame t.** That is the binding cross-attention
+never achieved.
+
+`val_x0_rel_mse` reaches **0.2884**, against the cross-attention run's best of 0.330 and the
+plain-O2 baseline's ~0.35 -- the best either metric has ever reached, achieved while also
+binding.
+
+**Caveat, stated deliberately: `bind` proves the model USES content position. It does NOT
+prove the output is intelligible.** Those are different claims, and this project has been
+burned repeatedly by a metric moving while the audio did not (Rank 2 improved x0_rel_mse by
+11% and was still babble). The decisive test remains oracle-vs-shuffled audio scored against
+the now-calibrated 0.36 target.
+
+The job trained all 100 epochs cleanly and then **failed at its own generation step**: the
+concat detection in `generate.py` sat inside the `--content-source` guard, but the training
+script generates with no content flag, so `conv_in` was never widened and a `[128,16,3,3]`
+checkpoint hit a `[128,8,3,3]` model. `conv_in`'s shape is a property of the CHECKPOINT, so
+detection was hoisted above the guard, defaulting to `--content-source zero` (the learned
+null the model saw during content-dropout training).
+
+### Research findings that reframe the endgame
+
+- **VoiceLDM** ([arXiv 2309.13664](https://arxiv.org/abs/2309.13664), ICASSP 2024) is our
+  architecture, already working: AudioLDM conditioned on BOTH an environmental description
+  AND speech content, using **AudioLDM's own frozen VAE and HiFi-GAN at 16 kHz**, reporting
+  **3.909% WER** -- better than the ground-truth recordings through the same ASR (11.8%).
+  Apache-2.0, training code public since May 2024 (license verified directly). It conditions
+  content by **cross-attention** -- but on a sequence its durator has already made
+  frame-aligned, and with **dual CFG** (separate `w_desc`, `w_cont`).
+- **Scale is the elephant.** VoiceLDM: ~6,750 h of speech. BVS (video->intelligible speech):
+  ~1,611 h. Ours: 17,596 clips x 4.86 s mean = **~24 h of actual speech** (the "42 h" figure
+  is canvas, ~53% of which is silence). A 100-300x gap, on the speech side specifically.
+- **We have never used content CFG.** The content channel has no null branch and no separate
+  guidance scale, while the pooled channel the oracle test discredited is amplified 3x.
+  `content_dropout_prob=0.1` now creates the null; the sampler still needs the dual-CFG term.
+- Confirmed unclaimed: no system in the field infers speech CONTENT from a non-speech scene.
+  Every environment-aware TTS (UmbraTTS, VoiceDiT, IDEA-TTS, I2TTS, ImmersiveTTS, VoiceLDM)
+  takes text as a mandatory input. F1 remains this project's contribution.

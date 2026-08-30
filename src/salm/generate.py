@@ -477,6 +477,30 @@ def main() -> int:
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
         checkpoint_epoch = payload.get("epoch")
+
+        # A content-CONCAT checkpoint has a 16-channel conv_in. That is a property of the
+        # CHECKPOINT, not of what the caller asked for, so it must be detected here --
+        # BEFORE the content-source guard below. Job 432493 trained 100 clean epochs and
+        # then failed at its own generation step because this check sat inside that guard:
+        # the training script generates with no --content-source, so the widening never ran
+        # and a [128,16,3,3] conv_in hit a [128,8,3,3] model.
+        if "content_projector" in payload and not use_content_xattn:
+            if args.content_source == "none":
+                # The model has never seen an 8-channel input and cannot run without the
+                # extra channels. `zero` feeds the all-zero content the model DID see during
+                # content-dropout training, i.e. its learned null -- the honest default.
+                args.content_source = "zero"
+                log("    checkpoint has a content-concat projector; no --content-source "
+                    "given, defaulting to 'zero' (the learned null seen during dropout "
+                    "training). Pass --content-source oracle|retrieval|shuffled to compare.")
+            use_content_xattn = True
+            if not args.ctc_checkpoint:
+                args.ctc_checkpoint = str(
+                    project_paths.OUTPUTS_ROOT
+                    / "ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt"
+                )
+                log(f"    defaulting --ctc-checkpoint to {args.ctc_checkpoint}")
+
         if use_content_xattn:
             # MUST install the adapter's to_k_ip/to_v_ip submodules BEFORE loading the
             # checkpoint's unet weights -- load_trained_unet uses strict=False, so on a
@@ -516,7 +540,13 @@ def main() -> int:
                     content_dim=ctc_head.encoder_dim, extra_channels=extra,
                     n_freq=n_freq, mode=pmode,
                 ).to(args.device)
-                content_projector.load_state_dict(payload["content_projector"])
+                proj_state = payload["content_projector"]
+                if "proj.bias" in proj_state:
+                    raise RuntimeError(
+                        "this concat checkpoint has a biased content projector, so zero content "
+                        "is not a true null control; retrain with the corrected bias-free projector"
+                    )
+                content_projector.load_state_dict(proj_state)
                 content_projector.eval()
                 # Widen BEFORE load_trained_unet, or strict=False silently drops the
                 # 16-channel conv_in and leaves the pretrained 8-channel one in place.
