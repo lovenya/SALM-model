@@ -1764,3 +1764,46 @@ moves the new submodules too. Resubmitting.
 Rank 3 and Rank 4 remain deferred pending Rank 2's actual result, same as before -- Rank 0's flat
 result doesn't change that ordering, it just raises the stakes on what Rank 2 shows. Rank 1 is
 dropped, not just deferred: no further time on the espeak/Kokoro environment fixes above.
+
+## 2026-08-30: Rank-2 retrieval outputs invalidated; corrected causal listening gate prepared
+
+The 2026-08-29 retrieval-conditioned generations are invalid and must not guide architecture
+decisions. The retrieval cache was built with the pretrained audio tower extracted from a full
+`transformers.ClapModel`. Live generation instead constructed `ClapAudioModel.from_pretrained`
+from that full-model checkpoint. The installed loader logged all `audio_model.*` weights as
+unexpected and all `audio_encoder.*` weights as missing/newly initialized. Thus cached database
+keys were correct, but live ambient queries came from a random tower.
+
+Fixes:
+
+- `ClapAudioSequenceEncoder` now always loads `ClapModel(...).audio_model`, exactly matching
+  precompute. Precompute can inject its already-loaded tower and no longer loads a second copy.
+- `scripts/a2s/check_clap_live_cache_parity.py` compares real live sequences to cached fp16
+  sequences and fails unless flattened cosine is ≥0.999 and every selected query retrieves its
+  own cache row at rank 1.
+- `salm.generate` now exposes `--content-source oracle|retrieval|shuffled|zero`, uses a
+  deterministic no-fixed-point shuffle, and stores per-clip content provenance.
+- Focused regression tests pass (4/4); syntax and `git diff --check` pass.
+- A packed four-H100 smoke/full job was prepared with a 20-minute internal deadline inside a
+  30-minute allocation, explicit collision rejection, artifact validation, and SUCCESS marker.
+  It has not been submitted.
+
+Pre-registered interpretation, with human listening primary:
+
+1. Oracle intelligible and clearly above shuffled/zero: the Rank-2 AudioLDM renderer/interface
+   can use a phonetic sequence; stop changing the renderer and learn ambient→content.
+2. Oracle gibberish across best/ep19/39/59/79/99: stop this AudioLDM1 path. More epochs or a
+   better ambient retrieval method cannot repair a renderer that fails with true target content.
+3. Mixed result: repeat the smallest differentiating checkpoint on 3 seeds × 8 clips before
+   training anything.
+
+Architecture research outcome: AudioLDM2 validates full-rate sequence conditioning for TTS but
+ships separate speech/general checkpoints and still has no official full training recipe; it is
+not the desired shared bidirectional base. Correction to the 2026-08-26 Audio-Omni assessment:
+the official repo now contains inference/model code and links released weights. The local clone
+does not contain `model.ckpt`, and exhaustive search finds no optimizer, dataset, training loss, or
+training entry point. Its generator can be adapted in principle—its editing API already accepts
+source audio—but doing so means implementing and validating a rectified-flow fine-tuning recipe,
+not invoking an official trainer. The actionable ladder is UNISON first, UniFlow-Audio second,
+then Audio-Omni after a released-checkpoint inference/round-trip gate. JEPA remains an auxiliary
+shared-memory objective, not a waveform generator or a justified “world model” on static pairs.

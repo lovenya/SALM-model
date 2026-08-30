@@ -9,6 +9,42 @@ This file is the internal working doc for this repo. It is NOT the public
 README -- keep cluster paths, in-progress decisions, and open questions here.
 Update it via the `/update-docs` skill after every meaningful milestone.
 
+## Current status — 2026-08-30
+
+- The user has listened to original speech, mel→vocoder reconstruction, and
+  VAE→vocoder reconstruction and confirms all are intelligible. The existing AudioLDM
+  VAE/vocoder is therefore not the present A2S gibberish bottleneck.
+- **Do not interpret the 2026-08-29 Rank-2 retrieval generations.** Precompute loaded
+  `ClapModel(...).audio_model`, but live generation loaded the same full checkpoint as a
+  standalone `ClapAudioModel`. With the installed transformers version, all pretrained
+  `audio_model.*` tensors were unexpected and the standalone tower's `audio_encoder.*`
+  tensors were newly initialized. Retrieval keys were pretrained/cache-derived while live
+  queries were random.
+- Fixed live CLAP loading to use exactly `ClapModel(...).audio_model`, added an injectable
+  tower so precompute does not load CLAP twice, and added a compute-side cache-parity gate.
+  Generation now supports explicit `oracle|retrieval|shuffled|zero` Rank-2 content sources
+  and records their source sample/file/similarity in every manifest row.
+- Prepared but **not submitted**:
+  `submission_scripts/run_tamia_a2s_rank2_matched_listening.sbatch`. Smoke runs one checkpoint
+  × four samples; full runs six unique checkpoints × four content sources × 16 fixed val rows,
+  with identical seeds and four packed H100 lanes. It refuses generation unless live/cache
+  cosine is at least 0.999 and every live query retrieves its own cached row at rank 1.
+- Decision gate: if target-speech **oracle** content produces recognizable English clearly
+  above shuffled/zero, keep the renderer and next learn ambient→content. If oracle remains
+  gibberish across the checkpoint spread, stop training this AudioLDM1 cross-attention path
+  and move to a released unified generator.
+- Current migration preference: UNISON first (one source-audio-conditioned flow-MM-DiT and
+  shared VAE, released fine-tuning path; research/non-commercial constraints), UniFlow-Audio
+  second (MIT code, smaller models, full training stack, shared generator with separate
+  time-aligned speech and cross-attention sound interfaces). AudioLDM2-TTS is an oracle/control,
+  not a shared released multitask checkpoint. Audio-Omni now has official inference code and a
+  released-weight link, but the local clone has no checkpoint and the repo has no optimizer,
+  dataset, loss, or training entry point. Its shared generator is adaptable in principle, but
+  requires us to implement and validate the rectified-flow fine-tuning recipe ourselves.
+- JEPA is scoped as an auxiliary masked cross-modal latent prediction loss on a shared
+  temporal scene/planning memory, not the speech renderer and not a literal action-conditioned
+  world model. Try it only after a simple paired contrastive/shared-memory baseline.
+
 ## Living docs — read these to catch up
 
 - `docs/EXPERIMENT_LOG.md` — chronological record of what we tried, measured, decided and got

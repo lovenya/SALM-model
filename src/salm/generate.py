@@ -50,6 +50,20 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def deranged_indices(n: int, seed: int) -> list[int]:
+    """Deterministic no-fixed-point permutation for shuffled-content controls."""
+    if n < 2:
+        raise ValueError("shuffled content requires at least two selected samples")
+    rng = np.random.default_rng(seed)
+    base = np.arange(n)
+    for _ in range(100):
+        candidate = rng.permutation(n)
+        if np.all(candidate != base):
+            return candidate.tolist()
+    # Deterministic fallback; a one-place rotation is always a derangement for n > 1.
+    return np.roll(base, 1).tolist()
+
+
 def load_pipeline(device: str, dtype: torch.dtype):
     from diffusers import AudioLDMPipeline
 
@@ -326,18 +340,17 @@ def main() -> int:
                          "--oracle-align vectors and, for --mode a2s with a 'clapseq' "
                          "checkpoint, has no other effect since generation always uses the "
                          "live CLAP tower")
-    # 2026-08-27: the first NON-oracle use of Rank 2's content cross-attention (see
-    # src/salm/a2s/content_adapter.py). Training only ever saw the TARGET speech's own
-    # content (unavailable here, by construction) -- at generation time we substitute a
-    # retrieval guess: find the closest TRAINING row by ambient-CLAP similarity, and reuse
-    # THAT row's speech content instead. Not the oracle's content, and not learned from
-    # ambient audio directly, but the cheapest real (non-cheating) content source available
-    # without training a new predictor from scratch.
+    # Rank-2 sequence-conditioning falsification. Keep the old boolean for compatibility,
+    # but make the actual content source explicit so oracle/retrieval/shuffled/zero outputs
+    # cannot be mistaken for one another.
     ap.add_argument("--use-content-xattn", action="store_true",
-                    help="a2s only: --checkpoint must be a Rank-2 (use_content_xattn=true) "
-                         "checkpoint. Installs the same cross-attention adapter before "
-                         "loading its weights, then feeds each row a retrieval-based "
-                         "content sequence (see --content-retrieval-root)")
+                    help="deprecated compatibility flag; equivalent to "
+                         "--content-source retrieval when no source is specified")
+    ap.add_argument("--content-source", default="none",
+                    choices=["none", "oracle", "retrieval", "shuffled", "zero"],
+                    help="a2s Rank-2 content sequence: target speech (oracle), nearest "
+                         "training speech by ambient CLAP (retrieval), another selected "
+                         "row's target speech (shuffled), literal zeros, or no adapter")
     ap.add_argument("--ctc-checkpoint", default=None,
                     help="required with --use-content-xattn: the frozen CTC probe whose "
                          "encoder produces the content sequence (same checkpoint the "
@@ -349,18 +362,23 @@ def main() -> int:
                          "is the retrieval database of ambient scenes to match against")
     args = ap.parse_args()
 
+    if args.use_content_xattn and args.content_source == "none":
+        args.content_source = "retrieval"
+        log("WARNING: --use-content-xattn is deprecated; using --content-source retrieval")
+    use_content_xattn = args.content_source != "none"
+
     if args.mode in ("s2a", "a2s", "b0") and not args.checkpoint:
         log(f"ERROR: --mode {args.mode} requires --checkpoint")
         return 1
     if args.oracle_align != "none" and args.mode != "a2s":
         log(f"ERROR: --oracle-align is a2s-only, got --mode {args.mode}")
         return 1
-    if args.use_content_xattn:
+    if use_content_xattn:
         if args.mode != "a2s":
-            log(f"ERROR: --use-content-xattn is a2s-only, got --mode {args.mode}")
+            log(f"ERROR: --content-source is a2s-only, got --mode {args.mode}")
             return 1
         if not args.ctc_checkpoint:
-            log("ERROR: --use-content-xattn requires --ctc-checkpoint")
+            log("ERROR: non-none --content-source requires --ctc-checkpoint")
             return 1
 
     out_dir = Path(args.out_dir)
@@ -370,6 +388,14 @@ def main() -> int:
     rows = rows[args.start_index :]
     if args.num_samples > 0:
         rows = rows[: args.num_samples]
+    shuffled_row_by_id = None
+    if args.content_source == "shuffled":
+        try:
+            perm = deranged_indices(len(rows), args.seed + 7919)
+        except ValueError as exc:
+            log(f"ERROR: {exc}")
+            return 1
+        shuffled_row_by_id = {row.sample_id: rows[j] for row, j in zip(rows, perm)}
     log(f"{args.mode}: generating {len(rows)} samples from {args.direction}/{args.split}")
 
     # Oracle vectors, keyed by sample_id rather than positionally: index.jsonl's row order
@@ -412,15 +438,15 @@ def main() -> int:
     # CLAP sequence (no new precompute needed -- scripts/a2s/precompute_a2s_conditioning.py
     # already wrote this for training) into one 768-d "scene key" per row, so a query's own
     # mean-pooled scene can be matched by cosine similarity at generation time.
-    retrieval_keys = retrieval_speech_files = None
-    if args.use_content_xattn:
+    retrieval_keys = retrieval_rows = None
+    if args.content_source == "retrieval":
         retrieval_root = Path(
             args.content_retrieval_root or (project_paths.OUTPUTS_ROOT / "features_a2s_cond")
         )
         train_cond_dir = retrieval_root / "train"
         train_index_file = project_paths.FEATURES_ROOT / "a2s" / "train" / "index.jsonl"
         if not (train_cond_dir / "cond_seq.npy").exists() or not train_index_file.exists():
-            log(f"ERROR: --use-content-xattn needs {train_cond_dir / 'cond_seq.npy'} and "
+            log(f"ERROR: --content-source retrieval needs {train_cond_dir / 'cond_seq.npy'} and "
                 f"{train_index_file}. Run scripts/a2s/precompute_a2s_conditioning.py and "
                 f"scripts/precompute_latents.py --direction a2s --target speech --split train.")
             return 1
@@ -429,14 +455,12 @@ def main() -> int:
             np.asarray(train_seq.mean(axis=1), dtype=np.float32)
         )
         retrieval_keys = F.normalize(retrieval_keys, dim=-1)
-        retrieval_speech_files = [
-            json.loads(l)["speech_file"] for l in train_index_file.read_text().splitlines() if l
-        ]
-        if len(retrieval_speech_files) != retrieval_keys.shape[0]:
-            log(f"ERROR: {train_index_file} has {len(retrieval_speech_files)} rows but "
+        retrieval_rows = [json.loads(l) for l in train_index_file.read_text().splitlines() if l]
+        if len(retrieval_rows) != retrieval_keys.shape[0]:
+            log(f"ERROR: {train_index_file} has {len(retrieval_rows)} rows but "
                 f"cond_seq.npy has {retrieval_keys.shape[0]} -- caches out of sync.")
             return 1
-        log(f"    content retrieval bank: {len(retrieval_speech_files)} training scenes")
+        log(f"    content retrieval bank: {len(retrieval_rows)} training scenes")
 
     dtype = torch.float16 if args.device.startswith("cuda") else torch.float32
     log("Loading AudioLDM ...")
@@ -453,7 +477,7 @@ def main() -> int:
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
         checkpoint_epoch = payload.get("epoch")
-        if args.use_content_xattn:
+        if use_content_xattn:
             # MUST install the adapter's to_k_ip/to_v_ip submodules BEFORE loading the
             # checkpoint's unet weights -- load_trained_unet uses strict=False, so on a
             # vanilla (un-adapted) U-Net it would silently DROP every adapter weight as
@@ -490,7 +514,16 @@ def main() -> int:
 
     for start in range(0, len(rows), args.batch_size):
         batch = rows[start : start + args.batch_size]
-        content_seq = None  # only the real (non-oracle) a2s branch below ever sets this
+        content_seq = None
+        content_meta = [
+            {
+                "content_source": "none",
+                "content_sample_id": None,
+                "content_speech_file": None,
+                "content_retrieval_similarity": None,
+            }
+            for _ in batch
+        ]
 
         # ---------------------------------------------- build the condition vector
         if args.mode == "b0":
@@ -544,25 +577,71 @@ def main() -> int:
                     len(batch), torch.device(args.device)
                 )
 
-                if args.use_content_xattn:
-                    # RETRIEVAL, not the oracle's own content: the ambient scene has no
-                    # words to begin with, so there is no "ground truth" content sequence
-                    # for it, unlike training (which peeked at the target speech). This
-                    # substitutes the content of the most acoustically-similar TRAINING
-                    # scene instead -- a real, honest guess derivable from the input alone,
-                    # not a shortcut past the actual problem.
+                if args.content_source == "retrieval":
+                    # Honest inference-time guess: use the speech paired with the closest
+                    # TRAINING ambience in the correctly cached CLAP sequence space.
                     m = mask.unsqueeze(-1).to(feats.dtype)
                     query_key = (feats * m).sum(1) / m.sum(1).clamp(min=1.0)
                     query_key = F.normalize(query_key.float(), dim=-1).cpu()
                     sims = query_key @ retrieval_keys.T          # (b, N)
                     best = sims.argmax(dim=1).tolist()
-                    matched_speech = [retrieval_speech_files[i] for i in best]
+                    source_rows = [retrieval_rows[i] for i in best]
+                    content_meta = [
+                        {
+                            "content_source": "retrieval",
+                            "content_sample_id": source_rows[i]["sample_id"],
+                            "content_speech_file": source_rows[i]["speech_file"],
+                            "content_retrieval_similarity": float(sims[i, best[i]].item()),
+                        }
+                        for i in range(len(batch))
+                    ]
+                elif args.content_source == "oracle":
+                    source_rows = batch
+                    content_meta = [
+                        {
+                            "content_source": "oracle",
+                            "content_sample_id": row.sample_id,
+                            "content_speech_file": str(row.speech_path),
+                            "content_retrieval_similarity": None,
+                        }
+                        for row in batch
+                    ]
+                elif args.content_source == "shuffled":
+                    source_rows = [shuffled_row_by_id[row.sample_id] for row in batch]
+                    content_meta = [
+                        {
+                            "content_source": "shuffled",
+                            "content_sample_id": row.sample_id,
+                            "content_speech_file": str(row.speech_path),
+                            "content_retrieval_similarity": None,
+                        }
+                        for row in source_rows
+                    ]
+                elif args.content_source == "zero":
+                    from salm.a2s.ctc_probe import CTC_FRAMES_OUT
 
+                    content_seq = torch.zeros(
+                        len(batch), CTC_FRAMES_OUT, ctc_head.encoder_dim,
+                        device=args.device, dtype=torch.float32,
+                    )
+                    content_meta = [
+                        {
+                            "content_source": "zero",
+                            "content_sample_id": None,
+                            "content_speech_file": None,
+                            "content_retrieval_similarity": None,
+                        }
+                        for _ in batch
+                    ]
+
+                if args.content_source in ("retrieval", "oracle", "shuffled"):
                     content_wavs = [
                         load_waveform_mono_16k(
-                            p, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left"
+                            str(row["speech_file"] if isinstance(row, dict) else row.speech_path),
+                            target_seconds=AUDIOLDM_CLIP_SECONDS,
+                            align="left",
                         )
-                        for p in matched_speech
+                        for row in source_rows
                     ]
                     content_wav_t = torch.from_numpy(np.stack(content_wavs)).float().to(args.device)
                     content_mel = content_extractor.batch(content_wav_t)
@@ -648,7 +727,7 @@ def main() -> int:
             pipe.unet.forward = restore_forward
         audios = result.audios
 
-        for row, audio in zip(batch, audios):
+        for row, audio, row_content_meta in zip(batch, audios, content_meta):
             gen_path = out_dir / "audio" / f"{row.sample_id}.wav"
             sf.write(gen_path, audio, AUDIOLDM_SR)
 
@@ -686,6 +765,7 @@ def main() -> int:
                     "audio_cap": row.audio_cap,
                     "speech_text": row.speech_text,
                     "generated_rms": float(np.sqrt(np.mean(np.square(audio)))),
+                    **row_content_meta,
                 }
             )
 
@@ -718,6 +798,7 @@ def main() -> int:
         # CONDITIONER was bypassed and the row's precomputed target embedding was fed to
         # class_labels directly -- see --oracle-align's help text for what that isolates.
         "oracle_align": args.oracle_align,
+        "content_source": args.content_source,
         "rms_mean": float(np.mean(rms)) if rms else 0.0,
         "rms_min": float(np.min(rms)) if rms else 0.0,
         "near_silent_count": int(sum(1 for r in rms if r < 1e-4)),

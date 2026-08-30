@@ -62,9 +62,10 @@ class ClapAudioSequenceEncoder(FrozenEncoder):
         model_id: str | Path | None = None,
         dtype: torch.dtype = torch.float32,
         device: torch.device | str = "cuda",
+        audio_model: torch.nn.Module | None = None,
     ) -> None:
         super().__init__()
-        from transformers import ClapAudioModel, ClapFeatureExtractor
+        from transformers import ClapFeatureExtractor, ClapModel
         from configs import paths as project_paths
 
         model_id = str(model_id or project_paths.CLAP_MODEL_ID)
@@ -72,9 +73,15 @@ class ClapAudioSequenceEncoder(FrozenEncoder):
         self.dtype = dtype
 
         self.feature_extractor = ClapFeatureExtractor.from_pretrained(model_id)
-        self.audio_model = (
-            ClapAudioModel.from_pretrained(model_id, dtype=dtype).to(self.device).eval()
-        )
+        # IMPORTANT: the official checkpoint is a *ClapModel* checkpoint. Loading it
+        # through ClapAudioModel changes the expected state-dict prefixes in the installed
+        # transformers version. The loader then leaves the tower newly initialized while
+        # still returning a runnable model. Precompute used ``ClapModel(...).audio_model``;
+        # live generation must use exactly the same route.
+        if audio_model is None:
+            full_model = ClapModel.from_pretrained(model_id, dtype=dtype)
+            audio_model = full_model.audio_model
+        self.audio_model = audio_model.to(self.device, dtype=dtype).eval()
         self._feature_dim = int(self.audio_model.config.hidden_size)
         # Filled in on the first forward, then asserted stable. Not hardcoded: it depends on
         # spec_size / patch_stride / depths, and a config change would otherwise pass silently.

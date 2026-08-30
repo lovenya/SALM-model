@@ -134,9 +134,7 @@ def main() -> int:
     # The sequence encoder wraps the SAME audio tower; sharing the loaded weights keeps one
     # copy in VRAM and guarantees the sequence features and the pooled embeddings come from
     # identical parameters.
-    encoder = ClapAudioSequenceEncoder(device=args.device)
-    encoder.audio_model = clap.audio_model
-    encoder.freeze()
+    encoder = ClapAudioSequenceEncoder(device=args.device, audio_model=clap.audio_model)
 
     cond_seq = None
     cond_mask = None

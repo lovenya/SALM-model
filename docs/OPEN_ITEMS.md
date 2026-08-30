@@ -546,10 +546,13 @@ CANNOT be trusted as a verdict on whether O-F worked, even once it lands — its
 dropped (0.3965→0.2968), and whether that bought real phonetic content is invisible to the current
 metric. Rank 0 below is required before any O-F conclusion is safe.
 
-**Audio-Omni: verdict DO NOT INVEST** (researched via the actual paper, not just the local checkpoint
+**Audio-Omni: original verdict superseded 2026-08-30** (researched via the actual paper, not just the local checkpoint
 config) — transcript is a mandatory input for every speech task in it, same shape as AudioLDM2-
 speech but bigger, no training code released, CC BY-NC 4.0, a completely different 44.1kHz stereo
-pipeline (nothing transfers), zero independent evaluation.
+pipeline (nothing transfers), zero independent evaluation. The official inference/model repository
+and a weight link are now available, but the local clone has no weight file and the release still
+has no training loop. Treat it as an actionable inference oracle and a possible custom fine-tuning
+port—not as a ready-to-run trainer, and no longer as “paper only.”
 
 **BEATs: settled** — its own paper's design goal is discarding fine-grained detail for high-level
 semantics, the opposite of what content needs. Only legitimate use: an alternative scene encoder,
@@ -558,6 +561,7 @@ doesn't beat CLAP's 0.45, drop permanently.
 
 **Ranked plan** (costs/falsification tests in EXPERIMENT_LOG 2026-08-26b and the agent's full report):
 - **[DONE 2026-08-26c, job 429378] Rank 0**: content-independent intelligibility metric
+
   (`scripts/a2s/score_intelligibility.py` — inter-ASR agreement between Whisper-large-v3 and our
   own frozen CTC probe, real-word rate against a vocabulary built from our own train transcripts).
   Retro-scored every generation lane on disk (A0-A3) plus the oracle ablation. Result: inter-ASR
@@ -595,6 +599,23 @@ doesn't beat CLAP's 0.45, drop permanently.
   confirmed nobody in the field infers speech content from a non-speech scene alone. Cheapest Stage-A
   baseline: retrieval against training transcripts using the existing ridge/conditioner apparatus,
   zero training, immediately gives a complete listenable system paired with Rank 1.
+
+### Added 2026-08-30 — corrected Rank-2 gate (next action; not submitted)
+
+- **[BLOCKING] Run the fixed smoke only after explicit user submission approval.** One unique
+  checkpoint, four fixed validation rows, oracle/retrieval/shuffled/zero in parallel. The job
+  first proves live CLAP/cache parity; do not bypass that gate.
+- **[THEN] Listen before full inference.** If oracle contains recognizable English and differs
+  from shuffled/zero, run all six unique checkpoint snapshots × 16 rows. If the oracle is still
+  gibberish, do not spend another training allocation on AudioLDM1 Rank-2.
+- **[MIGRATION GATE]** Audit/reconstruct UNISON's VAE on TTAS speech+audio, then released native
+  speech/sound generation, then 32–128-pair balanced A2S/S2A memorization with correct/shuffled/
+  zero source controls. UniFlow-Audio is the engineering fallback. Do not begin full 15k/17.6k
+  bidirectional training before the tiny paired memorization gate passes.
+- **[OPTIONAL ABLATION, NOT FIRST] JEPA** on masked paired scene-memory tokens. Compare against
+  simple paired contrastive alignment and retain only if it improves held-out cross-modal
+  retrieval and downstream listening. Avoid waveform cycle consistency initially because TTAS
+  mappings are one-to-many and can reward hidden-information shortcuts.
 
 ## Deliberately chosen against (so we stop re-proposing these)
 
