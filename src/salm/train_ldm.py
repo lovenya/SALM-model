@@ -203,6 +203,17 @@ class TrainConfig:
     # Reuses ctc_checkpoint (the same probe O-F trains against, if lambda_ctc > 0 too) -- one
     # checkpoint, two independent uses (a frozen scorer for O-F; a frozen encoder here).
     use_content_xattn: bool = False
+    # 2026-08-30: frame-aligned channel CONCATENATION of the content sequence, the
+    # alternative to use_content_xattn. Job 432420 showed the cross-attention branch does
+    # not bind content IDENTITY (oracle and shuffled content sound the same); F5-TTS/E2-TTS/
+    # VoiceBox all concatenate a frame-aligned content sequence instead. Our content is
+    # already 1:1 with the latent's own 25 fps / 256-frame time axis. See
+    # salm/a2s/content_concat.py. Mutually exclusive with use_content_xattn.
+    use_content_concat: bool = False
+    content_concat_channels: int = 8
+    content_concat_mode: str = "broadcast"   # or "full"
+    lr_content: float = 1.0e-4               # IP-Adapter's own adapter LR, not lr_unet's 1e-5
+    content_dropout_prob: float = 0.1        # per-row dropout to zero content; enables content CFG
 
     # runtime
     amp_dtype: str = "bf16"       # H100: bf16 needs no loss scaling
@@ -693,6 +704,51 @@ def main() -> int:
         log(f"    installed content cross-attention on {len(adapted)} attn2 layers "
             f"(content_dim={ctc_head.encoder_dim}): {adapted}")
 
+    content_projector = None
+    if cfg.use_content_concat:
+        if cfg.use_content_xattn:
+            raise SystemExit(
+                "use_content_concat and use_content_xattn are mutually exclusive -- they are "
+                "two competing answers to the same question (how content reaches the U-Net), "
+                "and running both would make the result uninterpretable."
+            )
+        if cfg.direction != "a2s":
+            raise SystemExit("use_content_concat is A2S-only (the oracle content source is "
+                             "the TARGET SPEECH, which only exists for a2s).")
+        if not cfg.ctc_checkpoint:
+            raise SystemExit("use_content_concat requires ctc_checkpoint (the frozen encoder "
+                             "that produces the content sequence).")
+        ctc_ckpt_path = Path(cfg.ctc_checkpoint)
+        if not ctc_ckpt_path.exists():
+            raise SystemExit(f"ctc_checkpoint does not exist: {ctc_ckpt_path}")
+
+        from salm.a2s.content_concat import ContentProjector, widen_conv_in
+        from salm.a2s.ctc_probe import SimpleCTCASR
+        from salm.data.frontend import MelConfig, MelExtractor
+
+        if ctc_head is None:
+            log(f"Loading frozen CTC head from {ctc_ckpt_path} (content-concat source) ...")
+            ctc_head = SimpleCTCASR().to(device).eval()
+            ctc_payload = torch.load(ctc_ckpt_path, map_location=device, weights_only=False)
+            ctc_head.load_state_dict(ctc_payload["model"])
+            for prm in ctc_head.parameters():
+                prm.requires_grad_(False)
+            ctc_head.rnn.train()   # cuDNN backward quirk; see the O-F block above
+        content_extractor = MelExtractor(MelConfig(norm_mode="none"), device=device)
+
+        content_projector = ContentProjector(
+            content_dim=ctc_head.encoder_dim,
+            extra_channels=cfg.content_concat_channels,
+            n_freq=int(train_ds.latent_shape[-1]),
+            mode=cfg.content_concat_mode,
+        ).to(device)
+        widen_conv_in(unet, cfg.content_concat_channels)
+        unet = unet.to(device)   # the widened conv_in is constructed on CPU
+        n_proj = sum(prm.numel() for prm in content_projector.parameters())
+        log(f"    content CONCAT active: +{cfg.content_concat_channels} input channels "
+            f"(mode={cfg.content_concat_mode}), projector {n_proj/1e3:.1f}k params, "
+            f"conv_in widened 8 -> {8 + cfg.content_concat_channels} with new channels zero-init")
+
     log(f"Building architecture {cfg.arch!r} from the registry ...")
     from salm.architectures import build as build_arch
 
@@ -723,6 +779,11 @@ def main() -> int:
         conditioner = DistributedDataParallel(conditioner, device_ids=[local_rank])
         if not cfg.freeze_unet:
             unet = DistributedDataParallel(unet, device_ids=[local_rank])
+        if content_projector is not None:
+            # Wrapped separately, like the conditioner: its params are used BEFORE unet's
+            # forward (they build conv_in's input), so DDP's hooks on the unet wrapper would
+            # never see them.
+            content_projector = DistributedDataParallel(content_projector, device_ids=[local_rank])
 
     conditioner_module = conditioner.module if isinstance(conditioner, DistributedDataParallel) else conditioner
 
@@ -733,6 +794,13 @@ def main() -> int:
     if not cfg.freeze_unet:
         param_groups.append(
             {"params": [p for p in unet.parameters() if p.requires_grad], "lr": cfg.lr_unet}
+        )
+    if content_projector is not None:
+        # Its own LR group: these are from-scratch weights, and lr_unet (1e-5) is calibrated
+        # for PRETRAINED ones. IP-Adapter's reference recipe trains its adapter at 1e-4.
+        param_groups.append(
+            {"params": [p for p in content_projector.parameters() if p.requires_grad],
+             "lr": cfg.lr_content}
         )
     optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
 
@@ -837,8 +905,38 @@ def main() -> int:
         else:
             content_kwargs["encoder_hidden_states"] = None
 
+        # Frame-aligned channel concat (the alternative to the cross-attention branch
+        # above). Content frame t is wired to latent frame t as an architectural fact
+        # rather than something attention has to learn. Zero-init conv_in channels mean
+        # this is a no-op at step 0.
+        unet_input = noisy
+        if content_projector is not None:
+            from salm.a2s.content_concat import concat_content
+            from salm.data.frontend import AUDIOLDM_CLIP_SECONDS, load_waveform_mono_16k
+
+            with torch.no_grad():
+                wavs = [
+                    load_waveform_mono_16k(
+                        f, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left"
+                    )
+                    for f in batch["speech_file"]
+                ]
+                wav_t = torch.from_numpy(np.stack(wavs)).float().to(device)
+                content_seq = ctc_head.encode(content_extractor.batch(wav_t))
+            if train and cfg.content_dropout_prob > 0.0:
+                # Independent per-row dropout to a ZERO content map, following IP-Adapter's
+                # 5% condition dropout and InstructPix2Pix's independent per-condition
+                # dropout. Two payoffs: robustness to absent/wrong content (the limiting
+                # case of the oracle-vs-retrieved gap), and a genuine null branch so content
+                # can be classifier-free guided at inference -- which it currently cannot.
+                keep = (torch.rand(content_seq.shape[0], device=device)
+                        >= cfg.content_dropout_prob).float()
+                content_seq = content_seq * keep[:, None, None]
+            content_map = content_projector(content_seq.to(noisy.dtype))
+            unet_input = concat_content(noisy, content_map)
+
         pred = unet(
-            noisy,
+            unet_input,
             timesteps,
             class_labels=cond,
             **content_kwargs,
@@ -948,8 +1046,26 @@ def main() -> int:
                 content_seq = ctc_head.encode(target_mel)
             content_kwargs["encoder_hidden_states"] = content_encoder_hidden_states(content_seq)
 
+        # Same widened-conv_in requirement as the training path: build the content map
+        # ONCE and hold it FIXED across all variants, so D1/D2 still isolate sensitivity to
+        # the pooled class_labels alone (content cancels out of the differences).
+        diag_input = noisy
+        if content_projector is not None:
+            from salm.a2s.content_concat import concat_content
+            from salm.data.frontend import AUDIOLDM_CLIP_SECONDS, load_waveform_mono_16k
+
+            wavs = [
+                load_waveform_mono_16k(f, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left")
+                for f in batch["speech_file"]
+            ]
+            wav_t = torch.from_numpy(np.stack(wavs)).float().to(device)
+            content_seq = ctc_head.encode(content_extractor.batch(wav_t))
+            diag_input = concat_content(
+                noisy, content_projector(content_seq.to(noisy.dtype))
+            )
+
         def eps(c):
-            return unet(noisy, timesteps, class_labels=c, **content_kwargs).sample
+            return unet(diag_input, timesteps, class_labels=c, **content_kwargs).sample
 
         e_c = eps(cond)
         e_s = eps(cond[perm])
@@ -1152,6 +1268,14 @@ def main() -> int:
         }
         if not cfg.freeze_unet:
             payload["unet"] = unet_module.state_dict()
+        if content_projector is not None:
+            proj = (content_projector.module
+                    if isinstance(content_projector, DistributedDataParallel)
+                    else content_projector)
+            payload["content_projector"] = proj.state_dict()
+            # Needed to rebuild the projector and re-widen conv_in at generation time.
+            payload["content_concat_channels"] = cfg.content_concat_channels
+            payload["content_concat_mode"] = cfg.content_concat_mode
 
         if resumable:
             # Without these a "resume" silently restarts Adam moments and the LR schedule,
@@ -1223,6 +1347,12 @@ def main() -> int:
         payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
         conditioner_module.load_state_dict(payload["mapper"])
+        if content_projector is not None and "content_projector" in payload:
+            proj = (content_projector.module
+                    if isinstance(content_projector, DistributedDataParallel)
+                    else content_projector)
+            proj.load_state_dict(payload["content_projector"])
+            log("    restored content projector from checkpoint")
         if "unet" in payload and not cfg.freeze_unet:
             unet_mod = unet.module if isinstance(unet, DistributedDataParallel) else unet
             unet_mod.load_state_dict(payload["unet"])

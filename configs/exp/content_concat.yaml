@@ -1,0 +1,43 @@
+# Frame-aligned channel CONCATENATION of the content sequence -- the successor to
+# configs/exp/content_xattn_oracle.yaml, which job 432420 falsified.
+#
+# WHAT 432420 SHOWED (2026-08-30). Four content sources x six checkpoints, matched rows,
+# seeds and sampler settings, CLAP encoder bug fixed and parity-verified, epoch-99
+# checkpoint. By ear: ORACLE content (perfect, exactly what training saw) and SHUFFLED
+# content (a different utterance's) produce essentially the same audio; only `zero` differs.
+# So the IP-Adapter cross-attention branch registers content PRESENCE but not IDENTITY.
+#
+# WHY CONCATENATION INSTEAD. F5-TTS (verified at dit.py:162), E2-TTS, VoiceBox and VoiceLDM
+# all deliver content as a FRAME-ALIGNED sequence concatenated onto the model input, not via
+# cross-attention. Our content sequence is already 1:1 with the latent's 25 fps / 256-frame
+# time axis, so we get for free the alignment F5 has to fake with filler-token padding.
+#
+# Layer ON TOP of o2_align.yaml (the pooled scene pathway is unchanged and still active):
+#   configs/base/a2s_audioldm.yaml, configs/arch/<arch>.yaml, o2_align.yaml, this file.
+#
+# EXPECTED RESULTS -- what each outcome means:
+#   SUCCESS: val_x0_rel_mse beats the cross-attention run's 0.330 floor AND, decisively,
+#     oracle-content generation becomes audibly more intelligible than shuffled-content
+#     generation at the same checkpoint. The second half is the real test: 432420 proved
+#     x0_rel_mse can improve while oracle and shuffled stay indistinguishable, so x0_rel_mse
+#     alone is NOT sufficient evidence.
+#   FAILURE (oracle still == shuffled): frame-aligned concatenation also fails to bind
+#     identity. That would point away from the injection mechanism entirely and toward
+#     scale -- VoiceLDM needed ~6,750 h of speech against our ~24 h -- making a warm start
+#     from a pretrained speech model the remaining option rather than another interface fix.
+#   AMBIGUOUS (x0_rel_mse improves, oracle vs shuffled marginal): more epochs or a content
+#     guidance sweep, not a new mechanism.
+#
+# select_metric is val_x0_rel_mse from the base config now -- NOT val_clap_r1, which scores
+# the conditioner only, peaks at epoch 2-8 and made every prior A2S result a snapshot of a
+# barely-trained renderer.
+
+use_content_concat: true
+content_concat_channels: 8
+content_concat_mode: broadcast
+content_dropout_prob: 0.1
+lr_content: 1.0e-4
+
+ctc_checkpoint: /scratch/l/lovenya/salm_model_outputs/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt
+epochs: 100
+lr_total_steps: 6800
