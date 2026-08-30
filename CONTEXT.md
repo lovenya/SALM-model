@@ -53,6 +53,10 @@ Update it via the `/update-docs` skill after every meaningful milestone.
   gets lost at the current pace.
 - `docs/ARCHITECTURE_MENU.md` — the options for what to try next, tiered so every added component
   is licensed by a measured gap against something simpler. Carries the research evidence.
+- `docs/RESEARCH_DIRECTIONS.md` — the IDEA SPACE: alternatives and architectures considered
+  (VoiceLDM, semantic-token cascades, content CFG, F1-as-contribution, world models/JEPA),
+  with the reasoning for and against each, and rejected ideas kept with their reasons so they
+  are not re-proposed. Separate from EXPERIMENT_LOG, which records only what was actually run.
 - `docs/wandb_setup.md` — W&B on this cluster (offline mode, sync workflow, the entity trap).
 - `docs/LEARNINGS.md` — portable technical lessons (gotchas, mechanisms, fixes) worth
   remembering independent of this project — interview-ready, not project narrative.
