@@ -60,7 +60,15 @@ diag_every_epochs: 5
 # CAVEAT specific to A2S: with align_target: text, val_clap_r1 ranks the conditioner output
 # against CLAP-TEXT embeddings of transcripts. Under O2 that is partly the training
 # objective, exactly as it was for S2A -- fine for selection, not independent evidence.
-select_metric: val_clap_r1
+# 2026-08-30 CHANGED from val_clap_r1. val_clap_r1 scores the CONDITIONER's retrieval and
+# never touches the U-Net's rendering; measured, it peaks at epoch 2-8 on every A2S run and
+# then declines, so `checkpoint_best` was ALWAYS a near-untrained renderer. Every A2S
+# conclusion to date (including the oracle ablation that motivated the whole content-xattn
+# programme) was generated from an epoch 2-6 checkpoint for exactly this reason.
+# val_x0_rel_mse measures how accurately the U-Net recovers the target latent, kept improving
+# to ~epoch 92 on the 100-epoch run, and IS sensitive to the content channel. Lower is better,
+# and it is correctly absent from _HIGHER_IS_BETTER in train_ldm.py.
+select_metric: val_x0_rel_mse
 
 save_every_epochs: 20
 snapshot_fp16: true
