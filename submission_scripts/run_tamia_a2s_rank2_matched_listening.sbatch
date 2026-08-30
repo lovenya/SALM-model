@@ -36,7 +36,11 @@ STEPS="${STEPS:-100}"
 SEED="${SEED:-1337}"
 
 case "$EVAL_KIND" in
-    smoke) NUM_SAMPLES="${NUM_SAMPLES:-4}"; CKPT_NAMES=(checkpoint_best.pt) ;;
+    # ep99, NOT checkpoint_best: select_metric was val_clap_r1, which peaks at epoch 8
+    # and measures the CONDITIONER only -- it cannot see the content channel at all.
+    # val_x0_rel_mse (the metric that does reflect it) kept improving to ~ep92, so
+    # checkpoint_best is the LEAST-trained adapter in the set.
+    smoke) NUM_SAMPLES="${NUM_SAMPLES:-8}"; CKPT_NAMES=(checkpoint_ep99.pt) ;;
     full)  NUM_SAMPLES="${NUM_SAMPLES:-16}"; CKPT_NAMES=(
         checkpoint_best.pt checkpoint_ep19.pt checkpoint_ep39.pt
         checkpoint_ep59.pt checkpoint_ep79.pt checkpoint_ep99.pt
