@@ -34,7 +34,15 @@
 
 use_content_concat: true
 content_concat_channels: 8
-content_concat_mode: broadcast
+# `full`, not `broadcast`. With broadcast, the content channels are constant along the
+# frequency axis, so conv_in's 3x3 kernel produces a contribution that is provably CONSTANT
+# in f for every interior bin -- the entire first-layer message is a per-time scalar field
+# of rank <= 8. Phoneme identity is primarily formant structure, i.e. a frequency-
+# distribution fact, so broadcast cannot inject the thing that distinguishes phonemes.
+# `full` gives 8x16 = 128 numbers per frame, matching the latent's own 128 per frame --
+# the content-width >= data-width ratio every working system in the survey maintains.
+# Cost: 65.7k params instead of 4.1k.
+content_concat_mode: full
 content_dropout_prob: 0.1
 lr_content: 1.0e-4
 

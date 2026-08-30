@@ -846,6 +846,7 @@ def main() -> int:
         timesteps: torch.Tensor | None = None,
         cond: torch.Tensor | None = None,
         return_extras: bool = False,
+        content_roll: int = 0,
     ):
         """
         AudioLDM's objective: MSE between predicted and true noise in latent space.
@@ -923,6 +924,15 @@ def main() -> int:
                 ]
                 wav_t = torch.from_numpy(np.stack(wavs)).float().to(device)
                 content_seq = ctc_head.encode(content_extractor.batch(wav_t))
+            if content_roll:
+                # THE BINDING PROBE. Shift the content sequence along TIME while leaving the
+                # target latent untouched. If the model is genuinely using content frame t
+                # to predict latent frame t, this must hurt. If the loss is unchanged, the
+                # model is reading only bag-level properties (presence, energy, extent) --
+                # exactly the failure job 432420 caught in the cross-attention branch, but
+                # detectable here at epoch 3 from a validation pass instead of after a
+                # whole generation job and a listening session.
+                content_seq = torch.roll(content_seq, shifts=content_roll, dims=1)
             if train and cfg.content_dropout_prob > 0.0:
                 # Independent per-row dropout to a ZERO content map, following IP-Adapter's
                 # 5% condition dropout and InstructPix2Pix's independent per-condition
@@ -1141,6 +1151,7 @@ def main() -> int:
         cos_sum, cos_count = 0.0, 0
         r1_sum, r5_sum, r_count = 0.0, 0.0, 0
         x0_sum, x0_count = 0.0, 0
+        x0_roll_sum, x0_roll_count = 0.0, 0
         d1_sum, d2_sum, d2z_sum, d_count = 0.0, 0.0, 0.0, 0
         bucket_sum = [0.0] * len(buckets)
         bucket_count = [0] * len(buckets)
@@ -1167,6 +1178,17 @@ def main() -> int:
                 if "x0_rel_mse" in extras:
                     x0_sum += extras["x0_rel_mse"].item() * n
                     x0_count += n
+                    # Binding probe: same batch, same cond, content shifted 64 frames
+                    # (~2.6 s at 25 fps) along time. Only meaningful when a content channel
+                    # exists, so it costs nothing on every other run.
+                    if cfg.use_content_concat or cfg.use_content_xattn:
+                        _, rex = diffusion_loss(
+                            batch, train=False, cond=cond, return_extras=True,
+                            content_roll=64,
+                        )
+                        if "x0_rel_mse" in rex:
+                            x0_roll_sum += rex["x0_rel_mse"].item() * n
+                            x0_roll_count += n
 
                 if "clap_target" in batch:
                     tgt = F.normalize(batch["clap_target"].to(device).float(), dim=-1)
@@ -1215,7 +1237,8 @@ def main() -> int:
             packed = torch.tensor(
                 [total, float(count), cos_sum, float(cos_count),
                  r1_sum, r5_sum, float(r_count), x0_sum, float(x0_count),
-                 d1_sum, d2_sum, d2z_sum, float(d_count)]
+                 d1_sum, d2_sum, d2z_sum, float(d_count),
+                 x0_roll_sum, float(x0_roll_count)]
                 + bucket_sum + [float(c) for c in bucket_count],
                 device=device,
                 dtype=torch.float64,
@@ -1227,8 +1250,9 @@ def main() -> int:
             r1_sum, r5_sum, r_count = vals[4], vals[5], int(vals[6])
             x0_sum, x0_count = vals[7], int(vals[8])
             d1_sum, d2_sum, d2z_sum, d_count = vals[9], vals[10], vals[11], int(vals[12])
-            bucket_sum = vals[13 : 13 + nb]
-            bucket_count = [int(c) for c in vals[13 + nb : 13 + 2 * nb]]
+            x0_roll_sum, x0_roll_count = vals[13], int(vals[14])
+            bucket_sum = vals[15 : 15 + nb]
+            bucket_count = [int(c) for c in vals[15 + nb : 15 + 2 * nb]]
 
         out = {"val_loss": total / max(count, 1)}
         if cos_count:
@@ -1241,6 +1265,16 @@ def main() -> int:
             out["val_clap_r1_chance"] = 1.0 / cfg.batch_size
         if x0_count:
             out["val_x0_rel_mse"] = x0_sum / x0_count
+            if x0_roll_count:
+                # val_content_bind_gap > 0 means time-shifting the content genuinely hurts,
+                # i.e. the model binds content to its own frame. ~0 means it does not, and
+                # no amount of further training on this mechanism will produce intelligible
+                # words. This is THE metric for the content channel -- val_clap_r1 and
+                # train_align come from the conditioner and cannot see it at all.
+                out["val_x0_rel_mse_rolled"] = x0_roll_sum / x0_roll_count
+                out["val_content_bind_gap"] = (
+                    x0_roll_sum / x0_roll_count - x0_sum / x0_count
+                )
         if d_count:
             # Renamed from val_d1_delta: this is now a relative PREDICTION gap, not a loss delta,
             # so the old name would silently mean something different in the same history.json.
@@ -1615,6 +1649,8 @@ def main() -> int:
                 + (f" x0={metrics['val_x0_rel_mse']:.4f}" if "val_x0_rel_mse" in metrics else "")
                 + (f" align={last_align:.4f}" if last_align is not None else "")
                 + (f" ctc={ctc_running/ctc_seen:.4f}({ctc_seen}b)" if ctc_seen else "")
+                + (f" bind={metrics['val_content_bind_gap']:+.4f}"
+                   if "val_content_bind_gap" in metrics else "")
                 + f" ({(time.time()-t_epoch)/60:.1f} min)")
             if "val_d1_gap" in metrics:
                 # The numbers that decide whether any of this is working. Both are relative

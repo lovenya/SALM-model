@@ -472,7 +472,7 @@ def main() -> int:
     # b0 loads the same checkpoint as s2a: it needs the conditioner for its learned null
     # embedding, and it must use the SAME U-Net, because B0 is the floor for THIS model rather
     # than a generic unconditional sample.
-    ctc_head = content_extractor = None
+    ctc_head = content_extractor = content_projector = None
     if args.mode in ("s2a", "a2s", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
@@ -496,10 +496,40 @@ def main() -> int:
                 p.requires_grad_(False)
             content_extractor = MelExtractor(MelConfig(norm_mode="none"), device=args.device)
 
-            adapted = install_content_cross_attention(pipe.unet, content_dim=ctc_head.encoder_dim)
-            pipe.unet.to(args.device)
-            log(f"    installed content cross-attention on {len(adapted)} attn2 layers "
-                f"(content_dim={ctc_head.encoder_dim})")
+            # Which injection mechanism this checkpoint was trained with is a property of
+            # the CHECKPOINT, not a flag the caller should have to remember and match --
+            # getting it wrong silently produces garbage (load_trained_unet uses
+            # strict=False). So detect it from the payload itself.
+            if "content_projector" in payload:
+                from salm.a2s.content_concat import ContentProjector, widen_conv_in
+
+                extra = int(payload.get("content_concat_channels", 8))
+                pmode = str(payload.get("content_concat_mode", "broadcast"))
+                n_freq = int(pipe.unet.config.sample_size) if hasattr(
+                    pipe.unet.config, "sample_size") else 16
+                # The latent's frequency extent, taken from the projector's own saved shape
+                # rather than guessed: out_features is extra*n_freq in "full" mode and
+                # extra in "broadcast" mode.
+                out_features = payload["content_projector"]["proj.weight"].shape[0]
+                n_freq = 16 if pmode == "broadcast" else out_features // extra
+                content_projector = ContentProjector(
+                    content_dim=ctc_head.encoder_dim, extra_channels=extra,
+                    n_freq=n_freq, mode=pmode,
+                ).to(args.device)
+                content_projector.load_state_dict(payload["content_projector"])
+                content_projector.eval()
+                # Widen BEFORE load_trained_unet, or strict=False silently drops the
+                # 16-channel conv_in and leaves the pretrained 8-channel one in place.
+                widen_conv_in(pipe.unet, extra)
+                pipe.unet.to(args.device)
+                log(f"    content CONCAT: +{extra} channels (mode={pmode}, n_freq={n_freq}), "
+                    f"conv_in widened 8 -> {8 + extra}")
+            else:
+                adapted = install_content_cross_attention(
+                    pipe.unet, content_dim=ctc_head.encoder_dim)
+                pipe.unet.to(args.device)
+                log(f"    installed content cross-attention on {len(adapted)} attn2 layers "
+                    f"(content_dim={ctc_head.encoder_dim})")
         if args.skip_unet_weights:
             log("    --skip-unet-weights: keeping the PRETRAINED U-Net (ablation baseline)")
         else:
@@ -704,6 +734,20 @@ def main() -> int:
                 # call is already using) rather than hardcoding fp16, so this also works
                 # unchanged on CPU (--device cpu, dtype=float32).
                 seq = seq.to(dtype=sample.dtype)
+
+                if content_projector is not None:
+                    # CONCAT checkpoint: content goes into the U-Net's INPUT, not into
+                    # encoder_hidden_states. conv_in was widened to 8+k channels at load
+                    # time, so the pipeline's plain 8-channel latent must be extended here
+                    # or the very first conv fails.
+                    from salm.a2s.content_concat import concat_content
+
+                    cmap = content_projector(seq).to(dtype=sample.dtype)
+                    return original_forward(
+                        concat_content(sample, cmap), timestep,
+                        encoder_hidden_states=None, **kwargs,
+                    )
+
                 return original_forward(
                     sample, timestep,
                     encoder_hidden_states=content_encoder_hidden_states(seq),
