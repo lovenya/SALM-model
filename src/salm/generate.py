@@ -347,14 +347,20 @@ def main() -> int:
                     help="deprecated compatibility flag; equivalent to "
                          "--content-source retrieval when no source is specified")
     ap.add_argument("--content-source", default="none",
-                    choices=["none", "oracle", "retrieval", "shuffled", "zero"],
+                    choices=["none", "oracle", "retrieval", "shuffled", "zero", "predicted"],
                     help="a2s Rank-2 content sequence: target speech (oracle), nearest "
                          "training speech by ambient CLAP (retrieval), another selected "
-                         "row's target speech (shuffled), literal zeros, or no adapter")
+                         "row's target speech (shuffled), literal zeros, a trained "
+                         "ambient->content regressor (predicted -- see --content-predictor-"
+                         "checkpoint; touches no speech at all, the honest deployable path), "
+                         "or no adapter")
     ap.add_argument("--ctc-checkpoint", default=None,
                     help="required with --use-content-xattn: the frozen CTC probe whose "
                          "encoder produces the content sequence (same checkpoint the "
                          "Rank-2 training run used)")
+    ap.add_argument("--content-predictor-checkpoint", default=None,
+                    help="required with --content-source predicted: checkpoint from "
+                         "scripts/a2s/train_content_predictor.py")
     ap.add_argument("--content-retrieval-root", default=None,
                     help="required with --use-content-xattn: root of the precomputed A2S "
                          "conditioning cache for the TRAIN split (default: "
@@ -379,6 +385,9 @@ def main() -> int:
             return 1
         if not args.ctc_checkpoint:
             log("ERROR: non-none --content-source requires --ctc-checkpoint")
+            return 1
+        if args.content_source == "predicted" and not args.content_predictor_checkpoint:
+            log("ERROR: --content-source predicted requires --content-predictor-checkpoint")
             return 1
 
     out_dir = Path(args.out_dir)
@@ -519,6 +528,23 @@ def main() -> int:
             for p in ctc_head.parameters():
                 p.requires_grad_(False)
             content_extractor = MelExtractor(MelConfig(norm_mode="none"), device=args.device)
+
+            content_predictor = None
+            if args.content_source == "predicted":
+                from salm.a2s.content_predictor import AmbientContentPredictor
+
+                log(f"    loading content predictor from {args.content_predictor_checkpoint} ...")
+                pred_payload = torch.load(
+                    args.content_predictor_checkpoint, map_location=args.device, weights_only=False
+                )
+                content_predictor = AmbientContentPredictor(
+                    content_dim=ctc_head.encoder_dim
+                ).to(args.device).eval()
+                content_predictor.load_state_dict(pred_payload["model"])
+                for p in content_predictor.parameters():
+                    p.requires_grad_(False)
+                log(f"    predictor params: {content_predictor.num_parameters()/1e6:.2f}M "
+                    f"(trained epoch={pred_payload.get('epoch')})")
 
             # Which injection mechanism this checkpoint was trained with is a property of
             # the CHECKPOINT, not a flag the caller should have to remember and match --
@@ -692,6 +718,22 @@ def main() -> int:
                     content_meta = [
                         {
                             "content_source": "zero",
+                            "content_sample_id": None,
+                            "content_speech_file": None,
+                            "content_retrieval_similarity": None,
+                        }
+                        for _ in batch
+                    ]
+                elif args.content_source == "predicted":
+                    # THE ACTUAL A2S CONTENT PATH: predicted from `feats`/`mask` -- the SAME
+                    # ambient CLAP features already computed above for `cond`. No speech file,
+                    # no lookup, nothing beyond this row's own ambient audio is touched. This
+                    # is the trained-regression replacement for `retrieval`'s nearest-neighbour
+                    # lookup -- see src/salm/a2s/content_predictor.py.
+                    content_seq = content_predictor(feats, mask)
+                    content_meta = [
+                        {
+                            "content_source": "predicted",
                             "content_sample_id": None,
                             "content_speech_file": None,
                             "content_retrieval_similarity": None,
