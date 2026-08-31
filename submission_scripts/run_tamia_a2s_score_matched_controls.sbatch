@@ -25,7 +25,7 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=480G
 #SBATCH --gpus-per-node=h100:4
-#SBATCH --time=00:40:00
+#SBATCH --time=00:10:00
 #SBATCH --output=/scratch/l/lovenya/salm_model_outputs/logs/slurm/%x-%j.out
 
 set -euo pipefail
