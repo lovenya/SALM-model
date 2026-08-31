@@ -748,6 +748,17 @@ def main() -> int:
         # internal call the pipeline makes receives our content tuple instead of None, and
         # everything else about the pipeline's tested behaviour is untouched. Restored
         # immediately after, so a later batch without content-xattn is unaffected.
+        #
+        # A concat checkpoint's conv_in is PHYSICALLY 16 channels regardless of --mode: only
+        # the a2s branch above ever builds content_seq, so b0/rung0/rung1/the oracle-ablation
+        # a2s branch would otherwise reach conv2d with 8 channels and crash (confirmed: job
+        # 432637's b0_uncond lane, "expected input[8, 8, 256, 16] to have 16 channels").
+        # Zero content is also the semantically correct floor for the UNCONDITIONAL lane --
+        # it is exactly the null the model saw during content-dropout training.
+        if content_projector is not None and content_seq is None:
+            content_seq = torch.zeros(
+                len(batch), 256, ctc_head.encoder_dim, device=args.device
+            )
         restore_forward = None
         if content_seq is not None:
             original_forward = pipe.unet.forward
