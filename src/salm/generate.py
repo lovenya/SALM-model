@@ -883,6 +883,19 @@ def main() -> int:
                 ref_path = out_dir / "audio" / f"{row.sample_id}__reference.wav"
                 sf.write(ref_path, ref, AUDIOLDM_SR)
 
+                # For a2s specifically: also write the AMBIENT INPUT itself, centre-aligned
+                # (the convention condition_file/ambient audio was cropped with at both
+                # precompute and generation time). Without this there is no way to listen to
+                # input/generated/reference together for the one lane (predicted) that is
+                # genuinely input-only -- oracle/retrieval/shuffled all reveal target or
+                # near-target speech some other way, but `predicted`'s only source of
+                # information is this file.
+                if is_a2s:
+                    inp = load_waveform_mono_16k(
+                        str(row.audio_path), target_seconds=AUDIOLDM_CLIP_SECONDS, align="center",
+                    )
+                    sf.write(out_dir / "audio" / f"{row.sample_id}__input_ambient.wav", inp, AUDIOLDM_SR)
+
             manifest_rows.append(
                 {
                     "sample_id": row.sample_id,
