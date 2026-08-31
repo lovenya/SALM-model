@@ -49,6 +49,12 @@ EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 TRAIN_MINUTES="${TRAIN_MINUTES:-35}"
 CTC_CKPT="${CTC_CKPT:-$OUTPUTS_ROOT/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt}"
+# v1 overfit past ~epoch 4 (val_cos 0.70 -> 0.65 by ep62). Defaults below match v1's own
+# (equally-default) values so a plain invocation is unchanged; override for a v2 attempt.
+WEIGHT_DECAY="${WEIGHT_DECAY:-1.0e-2}"
+HIDDEN_DIM="${HIDDEN_DIM:-512}"
+DROPOUT="${DROPOUT:-0.1}"
+EVAL_EVERY="${EVAL_EVERY:-2}"
 
 RUN_DIR="$OUTPUTS_ROOT/content_predictor/$RUN_NAME"
 LOG_DIR="$RUN_DIR/logs"
@@ -72,6 +78,8 @@ CUDA_VISIBLE_DEVICES=0 python scripts/a2s/train_content_predictor.py \
     --run-name "$RUN_NAME" --runs-root "$OUTPUTS_ROOT/content_predictor" \
     --ctc-checkpoint "$CTC_CKPT" \
     --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --max-train-minutes "$TRAIN_MINUTES" \
+    --weight-decay "$WEIGHT_DECAY" --hidden-dim "$HIDDEN_DIM" --dropout "$DROPOUT" \
+    --eval-every-epochs "$EVAL_EVERY" \
     "${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}" \
     2>&1 | tee -a "$LOG_DIR/train.log"
 

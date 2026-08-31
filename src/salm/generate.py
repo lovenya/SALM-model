@@ -361,6 +361,12 @@ def main() -> int:
     ap.add_argument("--content-predictor-checkpoint", default=None,
                     help="required with --content-source predicted: checkpoint from "
                          "scripts/a2s/train_content_predictor.py")
+    ap.add_argument("--content-scale", type=float, default=1.0,
+                    help="concat checkpoints only: multiply the projected content map by "
+                         "this before concatenation. 1.0 = trained behaviour exactly. NOT "
+                         "classifier-free guidance (no null-content term is subtracted) -- "
+                         "a direct content-strength knob, cheaper and less risky to run "
+                         "unattended than a full custom dual-CFG sampling loop")
     ap.add_argument("--content-retrieval-root", default=None,
                     help="required with --use-content-xattn: root of the precomputed A2S "
                          "conditioning cache for the TRAIN split (default: "
@@ -836,6 +842,15 @@ def main() -> int:
                     # pipe.unet.to(dtype). Run it in fp32 and cast the RESULT, which also
                     # avoids fp16 rounding inside the projection itself.
                     cmap = content_projector(seq.float()).to(dtype=sample.dtype)
+                    if args.content_scale != 1.0:
+                        # NOT classifier-free guidance (that needs a 3-pass custom denoising
+                        # loop -- separate w_desc/w_cont, like VoiceLDM's dual CFG -- which
+                        # is future work, not built here). This is a simpler, real knob:
+                        # directly scale how much the content channel contributes to
+                        # conv_in's extra input channels before concatenation. scale=1.0 is
+                        # the trained behaviour exactly; >1 amplifies content's influence,
+                        # <1 (down to 0) damps it toward the model's zero-content baseline.
+                        cmap = cmap * args.content_scale
                     return original_forward(
                         concat_content(sample, cmap), timestep,
                         encoder_hidden_states=None, **kwargs,

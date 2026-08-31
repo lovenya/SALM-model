@@ -98,6 +98,13 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--warmup-steps", type=int, default=300)
     ap.add_argument("--grad-clip", type=float, default=5.0)
+    ap.add_argument("--weight-decay", type=float, default=1e-2)
+    ap.add_argument("--hidden-dim", type=int, default=512,
+                     help="v1 overfit past ~epoch 4 (val_cos 0.70 -> 0.65 by ep62 while "
+                          "train_loss kept falling monotonically). Smaller default capacity "
+                          "here for v2, tunable to sweep.")
+    ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--num-encoder-layers", type=int, default=2)
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--eval-every-epochs", type=int, default=2)
     ap.add_argument("--save-every-epochs", type=int, default=20)
@@ -144,10 +151,13 @@ def main() -> int:
         content_dim=ctc_head.encoder_dim,
         ambient_frames=train_ds.cond_frames,
         content_frames=256,
+        hidden_dim=args.hidden_dim,
+        num_encoder_layers=args.num_encoder_layers,
+        dropout=args.dropout,
     ).to(device)
     log(f"predictor params: {model.num_parameters()/1e6:.2f}M")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     steps_per_epoch = len(train_loader)
     total_steps = steps_per_epoch * args.epochs
     scheduler = torch.optim.lr_scheduler.LambdaLR(
