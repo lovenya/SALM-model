@@ -761,24 +761,11 @@ def main() -> int:
             mode=cfg.content_concat_mode,
         ).to(device)
 
-        if cfg.use_conditioner_sequence:
-            from salm.a2s.conditioner_sequence import SequentialContentHead
-
-            if not hasattr(conditioner, "encode_sequence"):
-                raise SystemExit(
-                    "use_conditioner_sequence needs a conditioner exposing encode_sequence(); "
-                    f"{type(conditioner).__name__} does not. Use the xformer arch."
-                )
-            sequence_head = SequentialContentHead(
-                hidden_dim=conditioner.blocks[0].linear1.in_features,
-                content_dim=ctc_head.encoder_dim,
-                ambient_frames=int(train_ds.cond_frames),
-                content_frames=256,
-            ).to(device)
-            log("    END-TO-END sequential conditioning ACTIVE: the conditioner produces the "
-                f"content sequence itself ({sequence_head.num_parameters()/1e6:.2f}M head "
-                "params), no oracle/retrieval/predictor. "
-                f"lambda_content_aux={cfg.lambda_content_aux}")
+        # NOTE: sequence_head itself is NOT built here -- it needs `conditioner`, which the
+        # architecture registry builds further down (`build_arch`, after this whole
+        # use_content_concat block). Building it here hit UnboundLocalError on `conditioner`
+        # (job 434219, all 4 ranks, ~22s in). See the "sequence_head deferred build" block
+        # right after `conditioner = components.conditioner` below.
         widened_conv = widen_conv_in(unet, cfg.content_concat_channels)
         content_conv_weight = widened_conv.weight
         # The pretrained first eight input slices must retain their ordinary U-Net starting
@@ -812,6 +799,29 @@ def main() -> int:
     conditioner = components.conditioner
     log(f"    frozen encoder feature_dim={encoder.feature_dim}")
     log(f"    conditioner trainable params: {conditioner.num_trainable_parameters()/1e6:.2f}M")
+
+    # sequence_head deferred build: needs `conditioner`, just constructed above, and
+    # `content_projector`/`ctc_head`, built earlier in the use_content_concat block. Doing
+    # this here (rather than inline with the rest of that block) is the fix for 434219's
+    # UnboundLocalError -- `conditioner` did not exist yet at that point in the file.
+    if cfg.use_content_concat and cfg.use_conditioner_sequence:
+        from salm.a2s.conditioner_sequence import SequentialContentHead
+
+        if not hasattr(conditioner, "encode_sequence"):
+            raise SystemExit(
+                "use_conditioner_sequence needs a conditioner exposing encode_sequence(); "
+                f"{type(conditioner).__name__} does not. Use the xformer arch."
+            )
+        sequence_head = SequentialContentHead(
+            hidden_dim=conditioner.blocks[0].linear1.in_features,
+            content_dim=ctc_head.encoder_dim,
+            ambient_frames=int(train_ds.cond_frames),
+            content_frames=256,
+        ).to(device)
+        log("    END-TO-END sequential conditioning ACTIVE: the conditioner produces the "
+            f"content sequence itself ({sequence_head.num_parameters()/1e6:.2f}M head "
+            "params), no oracle/retrieval/predictor. "
+            f"lambda_content_aux={cfg.lambda_content_aux}")
 
     if cfg.freeze_unet:
         unet.eval()
