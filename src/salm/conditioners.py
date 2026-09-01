@@ -202,12 +202,23 @@ class XFormerConditioner(BaseConditioner):
             nn.Linear(hidden_dim, output_dim),
         )
 
-    def encode(self, features: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    def encode_sequence(self, features: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        """
+        The PRE-POOL per-frame representation, (B, T, hidden_dim).
+
+        `encode` computes this and then discards it in `self.pool`, purely because
+        AudioLDM's class_labels slot wants a single vector. A2S's content channel wants a
+        SEQUENCE (see salm/a2s/conditioner_sequence.py), so it is exposed here rather than
+        recomputed -- same weights, same forward, one shared computation.
+        """
         x = self.in_proj(features)
         src_key_padding_mask = None if mask is None else ~mask
         for block in self.blocks:
             x = block(x, src_key_padding_mask=src_key_padding_mask)
-        return self.out(self.pool(x, mask=mask))
+        return x
+
+    def encode(self, features: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        return self.out(self.pool(self.encode_sequence(features, mask), mask=mask))
 
 
 class QueryPoolMapper(BaseConditioner):

@@ -1,0 +1,81 @@
+# END-TO-END SEQUENTIAL CONDITIONING -- the conditioner infers the content channel from the
+# ambient audio itself. No oracle, no retrieval, no separately-trained predictor.
+#
+# WHERE THIS COMES FROM. Three results, in order:
+#   1. The pooled scene vector cannot carry speech content (established three ways).
+#   2. The frame-aligned CONCAT channel renders content near-verbatim when fed good content
+#      (job 433314: "Let's see if she starts this time..." came back as "Let's see if she
+#      stops this time..."; content_scale 1.5 -> dist 0.389 vs a 0.372 VAE-roundtrip
+#      ceiling). So F2, phonetic realizability, is SOLVED.
+#   3. Filling that channel by REGRESSION fails (both predictor sizes hit an identical ~0.70
+#      val_cos ceiling; MSE converges on E[content|ambient], the blurry mean, which has no
+#      committed phonetic identity), and filling it by RETRIEVAL works only by copying a
+#      training utterance verbatim -- rejected as a deliverable.
+#
+# WHAT CHANGES HERE. XFormerConditioner already computes a per-frame (B, 32, hidden) tensor
+# after its transformer blocks and throws it away in `self.pool`, purely because AudioLDM's
+# `class_labels` wanted one vector. SequentialContentHead taps that tensor, upsamples 32 ->
+# 256 (exactly 2**3; the latent axis is 256 frames at 25 fps), and drives the proven concat
+# channel with it. Trained on the DIFFUSION LOSS itself -- so the objective rewards
+# conditioning that helps produce the right speech, rather than being close-on-average to a
+# target vector, which is exactly the objective that produced the blur in (3).
+#
+# The pooled scene pathway is untouched and still active: `cond` still goes to class_labels
+# and still gets its O2 alignment loss. This ADDS a second, sequential output from the same
+# conditioner; it does not replace the first.
+#
+# Layering: configs/base/a2s_audioldm.yaml, configs/arch/<arch>.yaml, o2_align.yaml,
+# content_concat.yaml, this file.
+#
+# ---------------------------------------------------------------------------------------
+# EXPECTED RESULTS -- decided before the run, per the repo's standing rule. The metric that
+# actually reflects this mechanism is `val_content_bind_gap` plus `val_x0_rel_mse`; NOT
+# val_clap_r1 or train_align, both of which score the POOLED conditioner output that this
+# change never touches, and both of which would look identical whether the head works or is
+# dead. Both target metrics are computed every epoch in history.json (val_x0_rel_mse is also
+# the select_metric).
+#
+#   SUCCESS: val_content_bind_gap climbs clearly above zero (the oracle-fed concat run
+#     reached +0.36; anything durably above ~+0.05 means the head is emitting something the
+#     U-Net binds frame-to-frame, which regression-predicted content never achieved), AND
+#     val_x0_rel_mse improves on the zero-content concat baseline. Then generate: the test
+#     is whether ambient-derived speech is more speech-like than the `zero` control at the
+#     same checkpoint. This would be the first content in this project that is neither
+#     copied from the target nor looked up from the training set.
+#
+#   FAILURE (bind_gap stays ~0 through epoch 10-15): the head is producing timing/energy
+#     structure with no phonetic identity -- the same failure mode as cross-attention and as
+#     the regression predictor, now reached by a third route. That is a genuinely
+#     informative negative: it would mean the bottleneck is not the injection interface and
+#     not the training objective, but that ~24 h of paired data cannot support learning
+#     phonetic content from ambience at all, and the remaining move is a warm start from a
+#     model that already has speech (VoiceLDM, Apache-2.0, ~6,750 h) rather than another
+#     mechanism.
+#
+#   AMBIGUOUS (bind_gap small but positive, x0_rel_mse flat): the head has partial signal.
+#     Next step is then lambda_content_aux > 0 -- the auxiliary teacher wired into this run
+#     but left OFF here on purpose, so the first measurement is of the pure diffusion-loss
+#     objective and nothing else.
+# ---------------------------------------------------------------------------------------
+
+use_conditioner_sequence: true
+
+# OFF for this run, deliberately. Turning it on would pull the head's output toward the true
+# CTC content by MSE+cosine -- i.e. reintroduce exactly the regression objective that
+# produced the blurry mean. The whole hypothesis is that the diffusion loss avoids that, so
+# the first run must test it alone. Kept in the code as the designated follow-up if the
+# result is ambiguous.
+lambda_content_aux: 0.0
+
+# 0.05 rather than content_concat.yaml's 0.10: a dropped row contributes ZERO gradient to
+# the sequence head, and here the head is the entire experiment. 5% still leaves a genuine
+# null-content branch for classifier-free guidance at inference (IP-Adapter's own rate).
+content_dropout_prob: 0.05
+
+# 250 epochs at batch_size=64 (68 steps/epoch, 0.49 min/epoch measured on content_concat_v4).
+# Long on purpose: content_concat_v4's bind_gap was still climbing at epoch 200 (+0.317 at
+# ep99 -> +0.358 at ep199) with ORACLE content handed to it; a head that has to LEARN the
+# content has strictly more to fit, so a 100-epoch budget could not distinguish "does not
+# work" from "not trained yet". ~2h05 of compute.
+epochs: 250
+lr_total_steps: 17000

@@ -210,6 +210,17 @@ class TrainConfig:
     # already 1:1 with the latent's own 25 fps / 256-frame time axis. See
     # salm/a2s/content_concat.py. Mutually exclusive with use_content_xattn.
     use_content_concat: bool = False
+    # 2026-09-01: END-TO-END sequential conditioning -- the conditioner produces the content
+    # sequence itself from its own pre-pool features, trained on the diffusion loss alone.
+    # No oracle content, no retrieval, no separately-trained predictor. See
+    # salm/a2s/conditioner_sequence.py for why this is the experiment that follows from the
+    # concat mechanism working (job 433314) and regression-based prediction failing
+    # (2026-08-31). Requires use_content_concat (it reuses the proven concat injection).
+    use_conditioner_sequence: bool = False
+    # Optional auxiliary supervision: pull the conditioner's predicted content sequence
+    # toward the TRUE (target-speech-derived) one, exactly as O2 pulls the pooled vector
+    # toward its target. 0.0 = pure end-to-end, diffusion loss only. > 0 adds a teacher.
+    lambda_content_aux: float = 0.0
     content_concat_channels: int = 8
     content_concat_mode: str = "broadcast"   # or "full"
     lr_content: float = 1.0e-4               # IP-Adapter's own adapter LR, not lr_unet's 1e-5
@@ -706,6 +717,7 @@ def main() -> int:
 
     content_projector = None
     content_conv_weight = None
+    sequence_head = None
     if cfg.use_content_concat:
         if cfg.use_content_xattn:
             raise SystemExit(
@@ -748,6 +760,25 @@ def main() -> int:
             n_freq=int(train_ds.latent_shape[-1]),
             mode=cfg.content_concat_mode,
         ).to(device)
+
+        if cfg.use_conditioner_sequence:
+            from salm.a2s.conditioner_sequence import SequentialContentHead
+
+            if not hasattr(conditioner, "encode_sequence"):
+                raise SystemExit(
+                    "use_conditioner_sequence needs a conditioner exposing encode_sequence(); "
+                    f"{type(conditioner).__name__} does not. Use the xformer arch."
+                )
+            sequence_head = SequentialContentHead(
+                hidden_dim=conditioner.blocks[0].linear1.in_features,
+                content_dim=ctc_head.encoder_dim,
+                ambient_frames=int(train_ds.cond_frames),
+                content_frames=256,
+            ).to(device)
+            log("    END-TO-END sequential conditioning ACTIVE: the conditioner produces the "
+                f"content sequence itself ({sequence_head.num_parameters()/1e6:.2f}M head "
+                "params), no oracle/retrieval/predictor. "
+                f"lambda_content_aux={cfg.lambda_content_aux}")
         widened_conv = widen_conv_in(unet, cfg.content_concat_channels)
         content_conv_weight = widened_conv.weight
         # The pretrained first eight input slices must retain their ordinary U-Net starting
@@ -801,6 +832,8 @@ def main() -> int:
             # forward (they build conv_in's input), so DDP's hooks on the unet wrapper would
             # never see them.
             content_projector = DistributedDataParallel(content_projector, device_ids=[local_rank])
+        if sequence_head is not None:
+            sequence_head = DistributedDataParallel(sequence_head, device_ids=[local_rank])
 
     conditioner_module = conditioner.module if isinstance(conditioner, DistributedDataParallel) else conditioner
 
@@ -826,6 +859,12 @@ def main() -> int:
             # it even when its gradient slice is zero.
             "weight_decay": 0.0,
         })
+    if sequence_head is not None:
+        # From-scratch weights like the projector, so lr_content rather than lr_unet.
+        param_groups.append(
+            {"params": [p for p in sequence_head.parameters() if p.requires_grad],
+             "lr": cfg.lr_content}
+        )
     optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
 
     steps_per_epoch = len(train_loader)
@@ -943,15 +982,48 @@ def main() -> int:
             from salm.a2s.content_concat import concat_content
             from salm.data.frontend import AUDIOLDM_CLIP_SECONDS, load_waveform_mono_16k
 
-            with torch.no_grad():
-                wavs = [
-                    load_waveform_mono_16k(
-                        f, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left"
-                    )
-                    for f in batch["speech_file"]
-                ]
-                wav_t = torch.from_numpy(np.stack(wavs)).float().to(device)
-                content_seq = ctc_head.encode(content_extractor.batch(wav_t))
+            true_content = None
+            if sequence_head is not None:
+                # END-TO-END: the content sequence comes from the CONDITIONER's own pre-pool
+                # features -- the same forward pass that produced the pooled `cond` above --
+                # NOT from the target speech. Nothing about the target is read here, so this
+                # path is identical at training and inference. This is the whole point: no
+                # oracle, no retrieval, no separately-trained predictor.
+                if "cond_features" in batch:
+                    feats = batch["cond_features"].to(device, non_blocking=True)
+                    cmask = batch["cond_mask"].to(device, non_blocking=True)
+                else:
+                    with torch.no_grad():
+                        feats, cmask = encoder.encode_with_mask(
+                            batch["speech"].to(device), batch["speech_length"]
+                        )
+                pre_pool = conditioner_module.encode_sequence(feats, cmask)
+                content_seq = sequence_head(pre_pool)
+
+                if train and cfg.lambda_content_aux > 0.0:
+                    # Optional teacher, off by default: pull the predicted sequence toward
+                    # the true one, exactly as O2 pulls the pooled vector toward its target.
+                    # Used only to compute a loss -- never fed to the U-Net -- so inference
+                    # is unchanged whether this is on or off.
+                    with torch.no_grad():
+                        wavs = [
+                            load_waveform_mono_16k(
+                                f, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left"
+                            )
+                            for f in batch["speech_file"]
+                        ]
+                        wav_t = torch.from_numpy(np.stack(wavs)).float().to(device)
+                        true_content = ctc_head.encode(content_extractor.batch(wav_t))
+            else:
+                with torch.no_grad():
+                    wavs = [
+                        load_waveform_mono_16k(
+                            f, target_seconds=AUDIOLDM_CLIP_SECONDS, align="left"
+                        )
+                        for f in batch["speech_file"]
+                    ]
+                    wav_t = torch.from_numpy(np.stack(wavs)).float().to(device)
+                    content_seq = ctc_head.encode(content_extractor.batch(wav_t))
             if content_roll:
                 # THE BINDING PROBE. Shift the content sequence along TIME while leaving the
                 # target latent untouched. If the model is genuinely using content frame t
@@ -1033,6 +1105,15 @@ def main() -> int:
                 num = (x0_hat.detach() - latents.float()).flatten(1).pow(2).sum(1)
                 den = latents.float().flatten(1).pow(2).sum(1).clamp(min=1e-8)
                 extras["x0_rel_mse"] = (num / den).clamp(max=1e4).mean()
+
+        if true_content is not None:
+            # Auxiliary teacher for the end-to-end sequence head. Returned in extras (not
+            # folded into `loss` here) so the training loop can log it separately and the
+            # validation path, which passes train=False, never computes it at all.
+            aux = F.mse_loss(content_seq, true_content) + (
+                1.0 - F.cosine_similarity(content_seq, true_content, dim=-1).mean()
+            )
+            extras["content_aux"] = aux
         return loss, extras
 
     def diffusion_loss_at_timestep(
@@ -1350,6 +1431,12 @@ def main() -> int:
         }
         if not cfg.freeze_unet:
             payload["unet"] = unet_module.state_dict()
+        if sequence_head is not None:
+            head = (sequence_head.module
+                    if isinstance(sequence_head, DistributedDataParallel)
+                    else sequence_head)
+            payload["sequence_head"] = head.state_dict()
+            payload["use_conditioner_sequence"] = True
         if content_projector is not None:
             proj = (content_projector.module
                     if isinstance(content_projector, DistributedDataParallel)
@@ -1429,6 +1516,12 @@ def main() -> int:
         payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
         conditioner_module.load_state_dict(payload["mapper"])
+        if sequence_head is not None and "sequence_head" in payload:
+            head = (sequence_head.module
+                    if isinstance(sequence_head, DistributedDataParallel)
+                    else sequence_head)
+            head.load_state_dict(payload["sequence_head"])
+            log("    restored sequence head from checkpoint")
         if content_projector is not None and "content_projector" in payload:
             proj = (content_projector.module
                     if isinstance(content_projector, DistributedDataParallel)
@@ -1522,6 +1615,7 @@ def main() -> int:
             f"(cosine: 1-cos bounded [0,2]; infonce: cross-entropy / log(batch_size)), so "
             f"the alignment term starts ~{lam_align/0.198:.1f}x the diffusion term")
     last_align, last_dm = None, None
+    last_content_aux = None
 
     for epoch in range(start_epoch, cfg.epochs):
         if train_sampler is not None:
@@ -1567,6 +1661,14 @@ def main() -> int:
                     loss = loss_dm + lam * align
                     last_align = align.item()
                     last_dm = loss_dm.item()
+
+                    # End-to-end sequence head's optional teacher (lambda_content_aux=0 by
+                    # default -- pure diffusion-loss training). Additive, exactly like O2's
+                    # align term and O-F's CTC term.
+                    if cfg.lambda_content_aux > 0.0 and dm_extras is not None \
+                            and "content_aux" in dm_extras:
+                        loss = loss + cfg.lambda_content_aux * dm_extras["content_aux"]
+                        last_content_aux = dm_extras["content_aux"].item()
 
                     # ---- O-F: content loss on the decoded mel, additive to the O2 term
                     # above. See TrainConfig.lambda_ctc for the full motivation. Only rows
@@ -1764,6 +1866,8 @@ def main() -> int:
             # alignment term simply dominated the total.
             record["train_align"] = last_align
             record["train_diffusion"] = last_dm
+        if last_content_aux is not None:
+            record["train_content_aux"] = last_content_aux
         if cfg.lambda_ctc > 0.0:
             # A TRUE epoch mean (accumulated every qualifying step), unlike train_align's
             # last-batch snapshot -- deliberately not repeating that known defect in new code.

@@ -347,7 +347,8 @@ def main() -> int:
                     help="deprecated compatibility flag; equivalent to "
                          "--content-source retrieval when no source is specified")
     ap.add_argument("--content-source", default="none",
-                    choices=["none", "oracle", "retrieval", "shuffled", "zero", "predicted"],
+                    choices=["none", "oracle", "retrieval", "shuffled", "zero", "predicted",
+                             "conditioner"],
                     help="a2s Rank-2 content sequence: target speech (oracle), nearest "
                          "training speech by ambient CLAP (retrieval), another selected "
                          "row's target speech (shuffled), literal zeros, a trained "
@@ -488,6 +489,7 @@ def main() -> int:
     # embedding, and it must use the SAME U-Net, because B0 is the floor for THIS model rather
     # than a generic unconditional sample.
     ctc_head = content_extractor = content_projector = None
+    sequence_head = None
     if args.mode in ("s2a", "a2s", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
@@ -499,6 +501,13 @@ def main() -> int:
         # then failed at its own generation step because this check sat inside that guard:
         # the training script generates with no --content-source, so the widening never ran
         # and a [128,16,3,3] conv_in hit a [128,8,3,3] model.
+        if "sequence_head" in payload and args.content_source == "none":
+            # This checkpoint carries its own trained content producer. Its honest default
+            # is that producer -- ambient audio in, content out, no speech touched.
+            args.content_source = "conditioner"
+            use_content_xattn = True
+            log("    checkpoint has a conditioner sequence head; defaulting "
+                "--content-source to 'conditioner' (end-to-end ambient -> content)")
         if "content_projector" in payload and not use_content_xattn:
             if args.content_source == "none":
                 # The model has never seen an 8-channel input and cannot run without the
@@ -591,6 +600,25 @@ def main() -> int:
                 pipe.unet.to(args.device)
                 log(f"    content CONCAT: +{extra} channels (mode={pmode}, n_freq={n_freq}), "
                     f"conv_in widened 8 -> {8 + extra}")
+
+                if args.content_source == "conditioner":
+                    from salm.a2s.conditioner_sequence import SequentialContentHead
+
+                    if "sequence_head" not in payload:
+                        raise RuntimeError(
+                            "--content-source conditioner needs a checkpoint trained with "
+                            "use_conditioner_sequence=true; this one has no 'sequence_head'"
+                        )
+                    hstate = payload["sequence_head"]
+                    hidden = hstate["out_proj.weight"].shape[1]
+                    sequence_head = SequentialContentHead(
+                        hidden_dim=hidden, content_dim=ctc_head.encoder_dim,
+                    ).to(args.device)
+                    sequence_head.load_state_dict(hstate)
+                    sequence_head.eval()
+                    log(f"    conditioner sequence head loaded "
+                        f"({sequence_head.num_parameters()/1e6:.2f}M params, "
+                        f"hidden_dim={hidden})")
             else:
                 adapted = install_content_cross_attention(
                     pipe.unet, content_dim=ctc_head.encoder_dim)
@@ -724,6 +752,23 @@ def main() -> int:
                     content_meta = [
                         {
                             "content_source": "zero",
+                            "content_sample_id": None,
+                            "content_speech_file": None,
+                            "content_retrieval_similarity": None,
+                        }
+                        for _ in batch
+                    ]
+                elif args.content_source == "conditioner":
+                    # THE END-TO-END A2S PATH. Content comes from the conditioner's own
+                    # pre-pool sequence over `feats` -- the same ambient CLAP features that
+                    # produced `cond` two lines above. No speech file is opened, no training
+                    # row is looked up: everything downstream derives from this row's own
+                    # ambient audio, exactly as S2A derives its audio from its own speech.
+                    pre_pool = conditioner.encode_sequence(feats, mask)
+                    content_seq = sequence_head(pre_pool)
+                    content_meta = [
+                        {
+                            "content_source": "conditioner",
                             "content_sample_id": None,
                             "content_speech_file": None,
                             "content_retrieval_similarity": None,
