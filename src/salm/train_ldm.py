@@ -226,6 +226,20 @@ class TrainConfig:
     lr_content: float = 1.0e-4               # IP-Adapter's own adapter LR, not lr_unet's 1e-5
     content_dropout_prob: float = 0.1        # per-row dropout to zero content; enables content CFG
 
+    # PHASE 2 of end-to-end sequential conditioning (2026-09-01). Job 434308 trained the
+    # renderer (unet + content_projector) and the scene-understanding head SIMULTANEOUSLY
+    # from scratch -- so the renderer was never once shown real content (it only ever saw
+    # the head's own uninformative guesses) while the head had no fixed, competent target to
+    # push toward. Two moving parts with no anchor; val_content_bind_gap never left ~0.
+    #
+    # This warm-starts unet + content_projector + conditioner from a checkpoint that already
+    # renders real content correctly (content_concat_v4, oracle-trained, val_content_bind_gap
+    # +0.36, near-verbatim generation) and FREEZES them. Only the conditioner and the new
+    # sequence_head train, against a renderer that is guaranteed capable -- so gradient
+    # reaching scene-understanding has an actual signal to climb, not a co-adapting target.
+    renderer_checkpoint: str = ""
+    freeze_renderer: bool = True             # freeze unet + content_projector when warm-started
+
     # runtime
     amp_dtype: str = "bf16"       # H100: bf16 needs no loss scaling
     log_every: int = 25
@@ -457,6 +471,19 @@ def main() -> int:
             raise SystemExit(f"unknown config key: {k}")
         cur = getattr(cfg, k)
         setattr(cfg, k, type(cur)(v) if not isinstance(cur, bool) else v.lower() == "true")
+
+    if cfg.renderer_checkpoint and cfg.freeze_renderer:
+        # Reuse ALL of freeze_unet's existing machinery (eval(), requires_grad_(False) on
+        # every param, exclusion from the optimizer) rather than inventing a parallel path.
+        # The guard below (use_content_concat requires freeze_unet=false) is relaxed for
+        # exactly this case, since here the content conv_in slice is warm-started and
+        # competent, not zero-init and needing to learn.
+        if not cfg.use_content_concat:
+            raise SystemExit("renderer_checkpoint needs use_content_concat=true -- it warm "
+                             "starts the concat mechanism's own weights.")
+        cfg.freeze_unet = True
+        log(f"    renderer_checkpoint set: unet + content_projector will be frozen after "
+            f"loading from {cfg.renderer_checkpoint}")
 
     rank, world_size, local_rank = setup_distributed()
     device = torch.device(f"cuda:{local_rank}")
@@ -718,6 +745,8 @@ def main() -> int:
     content_projector = None
     content_conv_weight = None
     sequence_head = None
+    renderer_frozen = False
+    renderer_payload = None
     if cfg.use_content_concat:
         if cfg.use_content_xattn:
             raise SystemExit(
@@ -728,10 +757,12 @@ def main() -> int:
         if cfg.direction != "a2s":
             raise SystemExit("use_content_concat is A2S-only (the oracle content source is "
                              "the TARGET SPEECH, which only exists for a2s).")
-        if cfg.freeze_unet:
+        if cfg.freeze_unet and not cfg.renderer_checkpoint:
             raise SystemExit(
                 "use_content_concat requires freeze_unet=false: the zero-initialized conv_in "
-                "content slice must learn before any signal can reach the U-Net"
+                "content slice must learn before any signal can reach the U-Net. (freeze_unet "
+                "was forced True with no renderer_checkpoint set -- that combination is only "
+                "valid when warm-starting from an already-trained content-concat checkpoint.)"
             )
         if not cfg.ctc_checkpoint:
             raise SystemExit("use_content_concat requires ctc_checkpoint (the frozen encoder "
@@ -784,6 +815,36 @@ def main() -> int:
             f"(mode={cfg.content_concat_mode}), projector {n_proj/1e3:.1f}k params, "
             f"conv_in widened 8 -> {8 + cfg.content_concat_channels} with new channels zero-init")
 
+        if cfg.renderer_checkpoint:
+            # PHASE 2 warm start (2026-09-01). Overwrite the fresh (zero-init content slice)
+            # unet/projector just built above with weights from a checkpoint that already
+            # renders real content correctly, then freeze both entirely -- see the
+            # renderer_checkpoint field's docstring for why job 434308 needed this split.
+            rc_path = Path(cfg.renderer_checkpoint)
+            if not rc_path.exists():
+                raise SystemExit(f"renderer_checkpoint does not exist: {rc_path}")
+            log(f"    loading renderer (unet + content_projector) from {rc_path} ...")
+            renderer_payload = torch.load(rc_path, map_location="cpu", weights_only=False)
+            missing_keys = [k for k in ("unet", "content_projector") if k not in renderer_payload]
+            if missing_keys:
+                raise SystemExit(
+                    f"renderer_checkpoint is missing {missing_keys} -- it must be a "
+                    "use_content_concat checkpoint (e.g. content_concat_v4/checkpoint_best.pt), "
+                    "not a plain S2A or oracle-xattn one."
+                )
+            unet.load_state_dict(renderer_payload["unet"])
+            content_projector.load_state_dict(renderer_payload["content_projector"])
+            if cfg.freeze_renderer:
+                content_projector.eval()
+                for prm in content_projector.parameters():
+                    prm.requires_grad_(False)
+                renderer_frozen = True
+                log("    renderer FROZEN: unet + content_projector will receive zero "
+                    "gradient. Only conditioner + sequence_head train from here.")
+            else:
+                log("    WARNING: renderer_checkpoint loaded but freeze_renderer=false -- "
+                    "the proven renderer will be fine-tuned, not held fixed. Intentional?")
+
     log(f"Building architecture {cfg.arch!r} from the registry ...")
     from salm.architectures import build as build_arch
 
@@ -799,6 +860,17 @@ def main() -> int:
     conditioner = components.conditioner
     log(f"    frozen encoder feature_dim={encoder.feature_dim}")
     log(f"    conditioner trainable params: {conditioner.num_trainable_parameters()/1e6:.2f}M")
+
+    if renderer_payload is not None and "mapper" in renderer_payload:
+        # Warm start ONLY -- conditioner stays trainable (unlike unet/content_projector
+        # above). It already learned real structure over ambient CLAP sequences for the
+        # POOLED scene task; starting the new content-sequence work from there rather than
+        # random init gives sequence_head a less noisy signal to build on from step 0.
+        try:
+            conditioner.load_state_dict(renderer_payload["mapper"])
+            log("    conditioner warm-started from renderer_checkpoint (still trainable)")
+        except RuntimeError as e:
+            log(f"    conditioner warm start SKIPPED (shape mismatch, staying random-init): {e}")
 
     # sequence_head deferred build: needs `conditioner`, just constructed above, and
     # `content_projector`/`ctc_head`, built earlier in the use_content_concat block. Doing
@@ -828,6 +900,19 @@ def main() -> int:
         for p in unet.parameters():
             p.requires_grad_(False)
         log("    U-Net FROZEN (conditioner-only run)")
+        if renderer_frozen:
+            # Frozen WEIGHTS still need a full backward PASS: content_map feeds into
+            # conv_in, and gradient must flow all the way back through the (frozen) U-Net to
+            # reach content_projector/conditioner/sequence_head -- freezing a weight stops
+            # gradient accumulating ON it, it does not stop autograd computing gradient
+            # w.r.t. its INPUT. So this costs the same activation memory as training the
+            # U-Net normally; only the weight update is skipped. Verified against installed
+            # diffusers source (unet_2d_blocks.py): the checkpointing gate is
+            # `torch.is_grad_enabled() and self.gradient_checkpointing`, not `self.training`,
+            # so this is safe to enable on an eval()'d module.
+            unet.enable_gradient_checkpointing()
+            log("    gradient checkpointing ON despite frozen weights -- backward still "
+                "runs full-depth to reach the content head")
     else:
         unet.train()
         unet.enable_gradient_checkpointing()
@@ -837,10 +922,15 @@ def main() -> int:
         conditioner = DistributedDataParallel(conditioner, device_ids=[local_rank])
         if not cfg.freeze_unet:
             unet = DistributedDataParallel(unet, device_ids=[local_rank])
-        if content_projector is not None:
+        if content_projector is not None and not renderer_frozen:
             # Wrapped separately, like the conditioner: its params are used BEFORE unet's
             # forward (they build conv_in's input), so DDP's hooks on the unet wrapper would
-            # never see them.
+            # never see them. Skipped when renderer_frozen: DDP raises RuntimeError on a
+            # module with zero trainable params ("not needed when a module doesn't have any
+            # parameter that requires a gradient") -- verified against the installed
+            # torch/nn/parallel/distributed.py, not assumed. A frozen module needs no
+            # gradient sync across ranks anyway; every rank already has identical weights
+            # from the same renderer_checkpoint load.
             content_projector = DistributedDataParallel(content_projector, device_ids=[local_rank])
         if sequence_head is not None:
             sequence_head = DistributedDataParallel(sequence_head, device_ids=[local_rank])
@@ -857,11 +947,15 @@ def main() -> int:
             {"params": [p for p in unet.parameters()
                         if p.requires_grad and id(p) not in excluded], "lr": cfg.lr_unet}
         )
-    if content_projector is not None:
+    if content_projector is not None and not renderer_frozen:
         # Its own LR group: these are from-scratch weights, and lr_unet (1e-5) is calibrated
         # for PRETRAINED ones. IP-Adapter's reference recipe trains its adapter at 1e-4.
+        # Skipped entirely when renderer_frozen -- content_projector and content_conv_weight
+        # have requires_grad=False in that case, so an optimizer group here would just hold
+        # dead params (harmless to AdamW, but confusing in logs and checkpoints).
         content_params = [p for p in content_projector.parameters() if p.requires_grad]
-        content_params.append(content_conv_weight)
+        if content_conv_weight is not None and content_conv_weight.requires_grad:
+            content_params.append(content_conv_weight)
         param_groups.append({
             "params": content_params,
             "lr": cfg.lr_content,
@@ -1439,7 +1533,18 @@ def main() -> int:
             "config": asdict(cfg),
             "mapper": conditioner_module.state_dict(),
         }
-        if not cfg.freeze_unet:
+        # `unet` weights are the checkpoint's single biggest cost (~2.6GB), so the original
+        # intent of skipping them under freeze_unet was: a genuine conditioner-only run never
+        # touches the vanilla pretrained U-Net, so there's nothing to save. That assumption
+        # breaks the moment freeze_unet=True means "warm-started + intentionally frozen"
+        # rather than "never modified" -- renderer_frozen (this run) loads a WIDENED,
+        # FINE-TUNED U-Net from renderer_checkpoint, structurally and numerically different
+        # from vanilla AudioLDM. Omitting it here would make generate.py's load_trained_unet
+        # silently fall back to the pristine pretrained U-Net (its own documented behavior on
+        # a missing "unet" key) -- discarding everything content_concat_v4 learned without
+        # any error. Same reasoning extends to use_content_xattn, which also structurally
+        # modifies unet (installs adapter processors) independent of freeze_unet.
+        if not cfg.freeze_unet or cfg.use_content_concat or cfg.use_content_xattn:
             payload["unet"] = unet_module.state_dict()
         if sequence_head is not None:
             head = (sequence_head.module

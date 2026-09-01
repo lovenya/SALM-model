@@ -1,0 +1,66 @@
+# PHASE 2 of end-to-end sequential conditioning (2026-09-01).
+#
+# WHAT WENT WRONG IN PHASE 1 (job 434308). The renderer (unet + content_projector) and the
+# scene-understanding head (conditioner + sequence_head) were trained SIMULTANEOUSLY from
+# scratch. The renderer was never once shown real content -- it only ever saw the head's own
+# uninformative guesses -- while the head had no fixed, competent target to push toward. Two
+# moving parts, no anchor. val_content_bind_gap never left +0.0000/+0.0004 across 250 epochs,
+# and ASR intelligibility scoring confirmed it independently: conditioner-derived content and
+# literally zero content were indistinguishable at every checkpoint.
+#
+# THE FIX. Freeze the renderer at content_concat_v4's own proven weights -- the checkpoint
+# that turned oracle content into near-verbatim speech (job 433314: "Let's see if she starts
+# this time... wake up!" -> "Let's see if she stops this time... wake up."). Warm-start the
+# conditioner from the same checkpoint too (still trainable -- it already learned real
+# structure over ambient CLAP sequences for the pooled scene task). Only the conditioner and
+# a fresh sequence_head train, against a renderer guaranteed capable of using good content.
+# Gradient now has an actual signal to climb instead of a co-adapting target.
+#
+# This is NOT "predict the exact transcript from ambience" -- nothing in this loss forces an
+# exact-word match. The diffusion loss only rewards content that helps the (frozen, capable)
+# renderer lower its denoising error on this row's real target latent. What's being asked of
+# scene understanding is "produce a plausible enough representation of speech for this scene",
+# not "transcribe the ambience" -- exactly the reframe that motivated this run.
+#
+# Layering: configs/base/a2s_audioldm.yaml, configs/arch/<arch>.yaml, o2_align.yaml,
+# content_concat.yaml, this file.
+#
+# ---------------------------------------------------------------------------------------
+# EXPECTED RESULTS. Same instrument as phase 1 -- val_content_bind_gap and val_x0_rel_mse,
+# NOT val_clap_r1/train_align (pooled-pathway only, blind to this mechanism either way).
+#
+#   SUCCESS: val_content_bind_gap rises durably above ~+0.05 -- now a MEANINGFUL bar, because
+#     this run's renderer is proven capable (unlike phase 1's, which never saw real content
+#     and so could not have bound to it regardless of what the head produced). If bind_gap
+#     climbs here, it is real evidence the head is emitting position-differentiated content
+#     that a working renderer uses. Confirm by ear: generations should sound more speech-like
+#     than a `zero`-content control at the same checkpoint.
+#
+#   FAILURE (bind_gap stays ~0 again): now a MUCH stronger negative than phase 1's, because
+#     the "was the renderer ever shown real content" confound is gone -- the renderer here is
+#     the exact one that rendered real content correctly before. A repeat failure under these
+#     conditions argues the bottleneck is genuinely upstream: either ~24h of paired speech is
+#     not enough to learn ANY useful ambience->content mapping through this renderer's content
+#     distribution, or the CLAP ambient representation itself does not carry recoverable
+#     content (434204's thin, fast-overfitting retrieval signal already hinted at this). The
+#     designated next move at that point is a VoiceLDM warm start (more speech seen, not a
+#     fifth injection mechanism on the same data), not another architecture change here.
+#
+#   AMBIGUOUS (bind_gap small but positive, x0_rel_mse improves slightly): partial signal
+#     reaching the renderer. Next step: lambda_content_aux > 0, now layered on TOP of a
+#     working renderer rather than a co-adapting one -- a materially different, better-
+#     controlled version of the same idea phase 1 left untested.
+# ---------------------------------------------------------------------------------------
+
+use_conditioner_sequence: true
+lambda_content_aux: 0.0    # pure diffusion-loss signal, same reasoning as phase 1
+
+renderer_checkpoint: /scratch/l/lovenya/salm_model_outputs/runs/a2s_audioldm_clapseq_xformer/content_concat_v4/checkpoints/checkpoint_best.pt
+freeze_renderer: true
+
+# 250 epochs, same budget as phase 1 (measured safe: completed in 1:44:39 against a 2:45
+# limit). Kept identical rather than shortened -- only the trainable SURFACE shrank
+# (conditioner + sequence_head vs. the full renderer), not necessarily the number of epochs
+# needed to find a signal, and there is no measurement yet to justify a smaller budget.
+epochs: 250
+lr_total_steps: 17000
