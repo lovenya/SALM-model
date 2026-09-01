@@ -62,7 +62,7 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=480G
 #SBATCH --gpus-per-node=h100:4
-#SBATCH --time=03:30:00
+#SBATCH --time=02:45:00
 #SBATCH --output=/scratch/l/lovenya/salm_model_outputs/logs/slurm/%x-%j.out
 
 set -euo pipefail
@@ -78,8 +78,14 @@ EPOCHS="${EPOCHS:-250}"
 # or the cosine curve lands at the wrong position; pass both together if overriding either.
 BATCH_SIZE="${BATCH_SIZE:-64}"
 LR_TOTAL_STEPS="${LR_TOTAL_STEPS:-17000}"
-# Leaves ~55 min of the 3h30 wall clock for generation across the checkpoint spread.
-TRAIN_MINUTES="${TRAIN_MINUTES:-155}"
+# Budget, from measurement rather than padding: 250 ep x 0.493 min/ep (content_concat_v4,
+# 200 ep in 98.7 min) x 1.15 for this run's second conditioner forward pass = ~142 min of
+# training; 19 generation invocations x ~30 s each (job 432123 did 7 in 3:29 wall, model
+# load included) = ~10 min; ~5 min setup. 165 min requested against ~157 needed. The cap
+# below is the safety valve: if the node runs slower, training truncates gracefully at 140
+# min with checkpoints saved and generation still gets its slot, rather than the whole job
+# being killed mid-write.
+TRAIN_MINUTES="${TRAIN_MINUTES:-140}"
 NUM_GEN="${NUM_GEN:-16}"
 
 RUN_DIR="$RUNS_ROOT/$ARCH/$RUN_NAME"
