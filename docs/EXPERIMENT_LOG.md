@@ -1992,3 +1992,62 @@ null the model saw during content-dropout training).
 - Confirmed unclaimed: no system in the field infers speech CONTENT from a non-speech scene.
   Every environment-aware TTS (UmbraTTS, VoiceDiT, IDEA-TTS, I2TTS, ImmersiveTTS, VoiceLDM)
   takes text as a mandatory input. F1 remains this project's contribution.
+
+## 2026-09-01: end-to-end sequential conditioning -- clean failure, confirmed two independent ways
+
+**The experiment.** The conditioner produces the content channel itself from ambient audio
+alone -- no oracle, no retrieval, no separate predictor. `XFormerConditioner.encode_sequence()`
+exposes the per-frame `(B, 32, hidden)` tensor the transformer blocks already compute and the
+pool previously discarded; `SequentialContentHead` upsamples it 32->256 and drives the proven
+concat channel. Trained on the diffusion loss alone (`lambda_content_aux=0`). Full reasoning in
+`src/salm/a2s/conditioner_sequence.py` and `configs/exp/conditioner_sequence.yaml`.
+
+**Job 434204 (content retriever, run first as a diagnostic on the shared CLAP feature space):**
+`val_r1` peaked at 14.6x chance (epoch 8), then declined as the model overfit (val loss rising
+6.4->7.1 while train loss kept falling). Real structure, but thin and not durable -- a soft
+warning that the CLAP ambient representation itself may not carry much recoverable content.
+
+**Job 434308 (250 epochs, ~1:45 wall):** `val_content_bind_gap` never left the +0.0000 to
++0.0004 band across all 250 epochs (max +0.00044 @ ep17) -- three orders of magnitude below
+the oracle-fed concat run's +0.36, ~100x below the pre-registered "durably above +0.05"
+success bar, and flat rather than climbing (rules out "needed more epochs"). `val_x0_rel_mse`
+stayed flat too (~0.35-0.36, no improvement over zero-content).
+
+**Job 434365 (ASR intelligibility scoring, confirms the above independently):** generated
+`conditioner` and `zero` content from all 8 saved checkpoints, scored against the calibrated
+`real_speech` (0.3146) / `vae_roundtrip` (0.3724) floor.
+
+| source | dist range across checkpoints |
+|---|---|
+| `conditioner` | 0.9464 -- 0.9662 |
+| `zero` | 0.9461 -- 0.9694 |
+
+The two interleave with no consistent separation -- `conditioner` never beats `zero` as a
+group. Both sit at the noise floor (real speech 0.31, this run's oracle upper bound 0.94).
+This independently confirms `bind_gap`'s verdict: the head produces content the U-Net does
+not use.
+
+**Design flaw in the job's own "oracle upper bound" check, caught reading the result rather
+than before submitting -- worth stating plainly.** The submission script generated `oracle`
+content from `checkpoint_last` as a sanity check meant to isolate "is the renderer still
+capable" from "did the content source fail". It scored 0.9369 -- indistinguishable from
+noise, nowhere near `content_concat_v4`'s oracle-content result of ~0.29-0.39. This does NOT
+mean the concat mechanism regressed. It means the check doesn't test what it was designed to:
+`diffusion_loss` routes `content_seq` from `sequence_head`'s own output whenever
+`use_conditioner_sequence=True`, unconditionally -- so `content_projector` and the widened
+`conv_in` slice were trained EXCLUSIVELY on the sequence head's own (near-content-free, per
+bind_gap) guesses, never once on real content. Feeding real oracle content into that renderer
+at generation time is out-of-distribution for it; a bad score there says nothing about the
+concat mechanism itself, which v3/v4 already established works. Lesson for next time: an
+"upper bound" checkpoint-reuse trick like this is only valid when the checkpoint being reused
+was actually trained on the thing being checked.
+
+**Verdict, unambiguous per the pre-registered decision tree:** this is the FAILURE branch, not
+ambiguous -- bind_gap is pinned near zero the entire run, not "small but positive". A third
+independent route (cross-attention, then regression, now end-to-end diffusion-loss training)
+has failed to bind phonetic identity from ambient audio at ~24h of paired speech. Combined
+with 434204's thin/overfitting retrieval signal, the evidence points at the CLAP ambient
+representation and/or data scale as the shared bottleneck, not at any one injection mechanism
+or training objective. Per the pre-registered plan, the designated next move is a warm start
+from a model that already has speech (VoiceLDM, Apache-2.0, ~6,750h) rather than a fourth
+mechanism -- see `docs/RESEARCH_DIRECTIONS.md` D4.

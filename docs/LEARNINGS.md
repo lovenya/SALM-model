@@ -131,3 +131,26 @@ computed from the conditioner's output, which the channel never touches. The met
 eventually needed -- roll the conditioning sequence along time and check whether the loss gets
 worse -- is ~20 lines, runs in validation, and would have falsified the mechanism at epoch 3
 instead of after two training runs, a generation job, and a listening session.
+
+## A "sanity check" checkpoint that shares a variable with the thing it's checking isn't independent
+
+The end-to-end sequential-conditioning job (2026-09-01) generated `oracle` content from its
+own last checkpoint as a designed upper bound: if the concat channel still renders real
+content correctly, the failure is in the content source, not the renderer. It scored at the
+noise floor -- as bad as everything else -- which looked like the concat mechanism itself had
+broken.
+
+It hadn't. `diffusion_loss` routed `content_seq` from the new sequence head's own output
+*unconditionally* whenever the feature was active, with no code path that ever showed the
+renderer real content during training. So the "upper bound" checkpoint was never trained on
+the thing the upper-bound test fed it -- oracle content was out-of-distribution for that
+specific checkpoint, and a bad score there said nothing about the mechanism a prior run
+(`content_concat_v4`) had already validated with the same mechanism trained the normal way.
+
+**The lesson:** an upper-bound / sanity-check generation using a checkpoint from the run under
+test is only independent evidence if that checkpoint was actually exposed to the reference
+condition during training. If a new training mode reroutes what a shared component learns
+from, reusing that component's checkpoint to "check against the old baseline" silently tests
+something else -- here, out-of-distribution generalization, not renderer capability. Trace
+the actual data flow (what did THIS checkpoint's loss ever compute against?) before trusting
+a checkpoint-reuse control, not just what the generation flag says it's doing.
