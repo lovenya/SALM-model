@@ -348,7 +348,7 @@ def main() -> int:
                          "--content-source retrieval when no source is specified")
     ap.add_argument("--content-source", default="none",
                     choices=["none", "oracle", "retrieval", "shuffled", "zero", "predicted",
-                             "conditioner", "oracle_quantized"],
+                             "conditioner", "oracle_quantized", "codebook_lm"],
                     help="a2s Rank-2 content sequence: target speech (oracle), nearest "
                          "training speech by ambient CLAP (retrieval), another selected "
                          "row's target speech (shuffled), literal zeros, a trained "
@@ -362,6 +362,19 @@ def main() -> int:
     ap.add_argument("--content-predictor-checkpoint", default=None,
                     help="required with --content-source predicted: checkpoint from "
                          "scripts/a2s/train_content_predictor.py")
+    ap.add_argument("--content-lm-checkpoint", default=None,
+                    help="required with --content-source codebook_lm: a ContentLM checkpoint "
+                         "from scripts/a2s/train_content_lm.py. It carries its own codebook, "
+                         "so --content-codebook is not needed alongside it")
+    ap.add_argument("--content-lm-temperature", type=float, default=1.0,
+                    help="codebook_lm sampling temperature. 1.0 = the trained distribution. "
+                         "Lower commits harder (toward argmax, i.e. back toward the mean "
+                         "collapse this design exists to avoid); higher is more diverse and "
+                         "less coherent. THE knob worth sweeping first")
+    ap.add_argument("--content-lm-top-k", type=int, default=0,
+                    help="codebook_lm: truncate sampling to the k most likely codes (0=off)")
+    ap.add_argument("--content-lm-top-p", type=float, default=0.0,
+                    help="codebook_lm: nucleus sampling threshold (0=off)")
     ap.add_argument("--content-codebook", default=None,
                     help="required with --content-source oracle_quantized: a codebook_k*.pt "
                          "from scripts/a2s/build_content_codebook.py. THE GATE for the "
@@ -497,6 +510,7 @@ def main() -> int:
     ctc_head = content_extractor = content_projector = None
     sequence_head = None
     content_codebook = None
+    content_lm = None
     if args.mode in ("s2a", "a2s", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
@@ -576,6 +590,48 @@ def main() -> int:
                 log(f"    content codebook: K={cb_payload['num_codes']} "
                     f"(held-out rel_l2={st.get('rel_l2', float('nan')):.4f}, "
                     f"cosine={st.get('cosine', float('nan')):.4f})")
+
+            if args.content_source == "codebook_lm":
+                from salm.a2s.content_codebook import ContentCodebook
+                from salm.a2s.content_lm import ContentLM
+
+                if not args.content_lm_checkpoint:
+                    raise SystemExit(
+                        "--content-source codebook_lm requires --content-lm-checkpoint"
+                    )
+                lm_payload = torch.load(
+                    args.content_lm_checkpoint, map_location=args.device, weights_only=False
+                )
+                if int(lm_payload["num_codes"]) != int(lm_payload["codes"].shape[0]):
+                    raise SystemExit("ContentLM checkpoint's codebook size disagrees with itself")
+                content_lm = ContentLM(
+                    num_codes=int(lm_payload["num_codes"]),
+                    ambient_dim=int(lm_payload["ambient_dim"]),
+                    content_frames=int(lm_payload["content_frames"]),
+                    d_model=int(lm_payload["d_model"]),
+                    n_layers=int(lm_payload["layers"]),
+                    n_heads=int(lm_payload["heads"]),
+                ).to(args.device)
+                content_lm.load_state_dict(lm_payload["model"])
+                content_lm.eval()
+                # The codebook rides along inside the LM checkpoint, so the codes the model
+                # was trained to predict and the vectors they dequantize to can never drift
+                # apart -- a mismatch there would be silent and total.
+                content_codebook = ContentCodebook(
+                    int(lm_payload["num_codes"]), int(lm_payload["codes"].shape[1])
+                ).to(args.device)
+                content_codebook.codes.copy_(lm_payload["codes"].to(args.device))
+                if content_codebook.content_dim != int(ctc_head.encoder_dim):
+                    raise SystemExit(
+                        f"ContentLM codebook width {content_codebook.content_dim} != CTC probe "
+                        f"width {ctc_head.encoder_dim}"
+                    )
+                m = lm_payload.get("metrics", {})
+                log(f"    ContentLM: {content_lm.num_parameters()/1e6:.2f}M params, "
+                    f"K={content_lm.num_codes}, epoch={lm_payload.get('epoch')}, "
+                    f"scene_gap={m.get('val_scene_gap', float('nan')):+.4f}")
+                log(f"    sampling: temperature={args.content_lm_temperature} "
+                    f"top_k={args.content_lm_top_k} top_p={args.content_lm_top_p}")
 
             content_predictor = None
             if args.content_source == "predicted":
@@ -667,6 +723,12 @@ def main() -> int:
         clap = ClapAudioEncoder(args.device)
 
     generator = torch.Generator(device=args.device).manual_seed(args.seed)
+    # A SEPARATE stream for content-LM sampling. Drawing codes from `generator` would advance
+    # its state, so the diffusion noise in this lane would differ from a `zero`-content lane
+    # generated at the same seed -- and matched noise across lanes is the only reason the
+    # oracle-vs-shuffled style comparisons in this project mean anything. Offset seed so the
+    # two streams are independent rather than identical.
+    lm_generator = torch.Generator(device=args.device).manual_seed(args.seed + 9973)
     manifest_rows: list[dict] = []
     t0 = time.time()
 
@@ -785,6 +847,34 @@ def main() -> int:
                     content_meta = [
                         {
                             "content_source": "zero",
+                            "content_sample_id": None,
+                            "content_speech_file": None,
+                            "content_retrieval_similarity": None,
+                        }
+                        for _ in batch
+                    ]
+                elif args.content_source == "codebook_lm":
+                    # THE DEPLOYABLE PATH. `feats` is this row's OWN ambient audio, already
+                    # encoded above for the pooled scene condition -- no speech file is
+                    # opened and no training row is looked up. The LM samples a code
+                    # sequence from P(codes | scene), and dequantizing gives content that is
+                    # on-manifold by construction (every frame is a real codebook entry).
+                    # Sampling, not argmax: argmax would walk straight back into the
+                    # conditional mean this whole design exists to escape.
+                    sampled = content_lm.sample(
+                        feats.float(),
+                        temperature=args.content_lm_temperature,
+                        top_k=args.content_lm_top_k,
+                        top_p=args.content_lm_top_p,
+                        generator=lm_generator,
+                    )
+                    content_seq = content_codebook.dequantize(sampled)
+                    uniq = int(sampled[0].unique().numel())
+                    log(f"      sampled codes: {uniq} distinct of "
+                        f"{sampled.shape[1]} frames (row 0)")
+                    content_meta = [
+                        {
+                            "content_source": "codebook_lm",
                             "content_sample_id": None,
                             "content_speech_file": None,
                             "content_retrieval_similarity": None,
