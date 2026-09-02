@@ -154,3 +154,45 @@ from, reusing that component's checkpoint to "check against the old baseline" si
 something else -- here, out-of-distribution generalization, not renderer capability. Trace
 the actual data flow (what did THIS checkpoint's loss ever compute against?) before trusting
 a checkpoint-reuse control, not just what the generation flag says it's doing.
+
+## A deterministic predictor cannot be taught a one-to-many mapping, no matter the loss or the capacity
+
+Three attempts to predict speech content from an ambient scene failed the same way, and the
+reason is a closed-form property of the objective, not a bug:
+
+    argmin_f E[(f(x) - y)^2]  =  f(x) = E[y | x]
+
+Squared error is minimized by the conditional mean. Cosine loss behaves the same way. And
+critically, the diffusion loss did too, because the stochasticity in a diffusion model lives
+in the **sampler's noise** -- it varies the *realisation* of a given conditioning. A
+deterministic network sitting outside that loop, emitting one fixed conditioning vector
+trained against specific targets, collapses exactly like a regressor. Putting randomness
+somewhere in the system is not the same as putting it in the component that has to make the
+choice.
+
+Three corrections to the intuitions that delayed this diagnosis, all worth keeping:
+
+1. **It is not caused by duplicate targets.** Our dataset was a strict bijection -- one input,
+   one target. The averaging happens across **neighbours**: near-identical inputs with
+   unrelated targets, which a smooth function cannot separate, so the competing gradients
+   balance at the mean.
+2. **It shows up on validation regardless of memorisation.** Even a model that fits every
+   training pair perfectly has no memorised answer for an unseen input, and interpolating
+   between known neighbours *is* averaging. This is why more capacity never helped, and why
+   train/val divergence is the wrong thing to look at for this failure.
+3. **Whether the mean is harmful depends on the target's nature.** For texture-like targets
+   (ambient audio, characterised by its statistics) the mean of plausible outputs is still a
+   plausible output -- averaging degrades gracefully, which is why the reverse direction of the
+   same architecture worked fine. For symbolic targets (phonemes, words) the mean is
+   **off-manifold**: the average of two utterances is not a blurry utterance, it is not an
+   utterance. Ask which kind of target you have before choosing a regression objective.
+
+**The fix is to make the prediction categorical and then sample.** Quantize the target space
+into K real units, predict a distribution over them with cross-entropy (whose optimum is the
+true conditional distribution, not its mean), and sample at inference. The mean of a
+distribution over categories is not a category, so the collapse becomes impossible rather than
+merely discouraged -- and every output is on-manifold by construction. Make it autoregressive,
+or independent per-position sampling reintroduces incoherence from a different direction.
+
+Published precedent for the identical failure and identical fix: lip-to-speech, 65-78% WER
+with mel regression to 50.2/44.8% with discrete units (Choi et al., arXiv 2305.19603).

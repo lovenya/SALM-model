@@ -2096,3 +2096,48 @@ has speech (VoiceLDM, Apache-2.0, ~6,750h of speech vs. our ~24h) rather than a 
 injection mechanism on the same data. Intelligibility scoring (ASR-based, matching the
 instrument used to confirm phase 1's failure) is queued to run before treating this as final
 -- see `docs/RESEARCH_DIRECTIONS.md` D4 for the warm-start plan.
+
+## 2026-09-02: discrete content units -- job 436244, gated before any predictor exists
+
+**Direction.** See `docs/RESEARCH_DIRECTIONS.md` D7 for the full argument. Short version: the
+two honest content sources both collapsed to the conditional mean, which in content space is
+off-manifold, and no amount of capacity or renderer-freezing changes that because the collapse
+is a property of the objective (`argmin E[(f(x)-y)^2] = E[y|x]`), not the architecture.
+Discretizing content and predicting a categorical distribution makes the optimum the true
+conditional distribution instead of its average, and makes every possible output a real
+content frame.
+
+**Job 436244 is a GATE, not a result.** It fits codebooks at K = 256/512/1024/2048 over the
+training split's real CTC-probe frames, then feeds **quantized oracle** content through the
+already-proven `content_concat_v4` renderer and scores the generated audio. Nothing else about
+that lane differs from plain `oracle`, so any change is attributable to quantization alone.
+
+Pre-registered, per the repo's standing rule:
+
+| calibration | dist |
+|---|---|
+| real speech | 0.315 |
+| VAE round-trip ceiling | 0.372 |
+| **unquantized oracle** | **0.389** &larr; the number to stay near |
+| noise floor | ~0.95 |
+
+- **PASS** &mdash; quantized oracle lands near 0.389 at some K. The representation is faithful,
+  K is chosen from this measurement, and the autoregressive predictor is worth building.
+  This is the only outcome that justifies writing it.
+- **FAIL** &mdash; collapses toward ~0.95 at every K including 2048. Phoneme identity does not
+  survive frame-wise vector quantization in this space; the discrete plan is dead *as
+  specified*, learned in one hour rather than after building a predictor on top of it. Fallback
+  is a different unit: residual/product quantization, or self-supervised units (HuBERT) rather
+  than our CTC probe's GRU output.
+- **PARTIAL** &mdash; degrades smoothly with K. Prices the representation; proceed at the
+  largest K that holds, accepting a harder prediction problem.
+
+Reconstruction cosine is explicitly **not** accepted as the test. Cosine 0.95 could still
+destroy phoneme identity, and this project has repeatedly seen a metric move while the audio
+did not. The build script reports it (on held-out frames the codebook never saw) as context
+for choosing K, not as evidence of intelligibility.
+
+**Caught before submission,** in CPU smoke testing: random-sample k-means init was getting
+stuck, recovering only ~9.4 of 12 well-separated synthetic clusters. Replaced with k-means++
+seeding &mdash; 12.00/12. Also verified chunked nearest-code equals unchunked, a seed gives a
+bit-identical codebook, and every dequantized frame is literally a codebook entry.

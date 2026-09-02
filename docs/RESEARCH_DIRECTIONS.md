@@ -162,6 +162,76 @@ wrong for an inherently one-to-many task. Candidates: R-precision / self-retriev
 generated speech match its OWN scene better than a random one?), distributional metrics,
 LLM-as-judge, human protocols from dialogue and story generation.
 
+### D7. Discrete content units + autoregressive sampling -- ACTIVE, the current main line
+
+**The diagnosis this direction answers.** Four content sources have been tried. Retrieval and
+oracle work but cheat (copy a training utterance / read the target). The two honest ones --
+regression (2026-08-31) and end-to-end diffusion-loss training (jobs 434308, 434417) --
+failed identically, and the reason is mathematical rather than architectural:
+
+    argmin_f E[(f(x) - y)^2]  =  f(x) = E[y | x]
+
+A deterministic map trained against specific targets converges on the conditional MEAN. Three
+things about this were initially mis-stated and are worth keeping straight:
+
+  - It is **not** caused by one-to-many data. The dataset is a strict bijection: one ambience,
+    one utterance. The averaging happens across **neighbours** -- two kitchen recordings sit
+    close in CLAP space with unrelated transcripts, and a smooth function cannot emit wildly
+    different content for near-identical inputs, so the competing pulls balance at the mean.
+  - The decisive version: `bind_gap` is measured on **validation**. Even perfect memorisation
+    of all 17,596 training pairs leaves an unseen clip with no memorised answer, and the only
+    thing a deterministic map can do there is interpolate between known neighbours -- which is
+    averaging by definition. That is why extra capacity never helped.
+  - The diffusion loss did not rescue it because **the stochasticity is in the wrong place**.
+    Diffusion's randomness lives in the sampler's noise, varying the *realisation* of a given
+    conditioning. The thinker sits outside that loop feeding one fixed vector, trained by
+    gradient descent against specific targets, and collapses exactly like the MSE predictor.
+
+And in content space that mean is **off-manifold**: the average of the encodings of "dinner's
+ready" and "where are my keys" is not a blurry utterance, it is not an utterance. This also
+plausibly explains job 434417's flat-zero result -- a renderer frozen on real encodings was
+handed input outside everything it had ever seen, and returned almost no gradient.
+
+**The mechanism.** Quantize content to K real frames learned from actual training speech
+(`src/salm/a2s/content_codebook.py`). Content becomes 256 discrete indices, and both halves of
+the failure are addressed at once:
+
+  1. Every possible output is a real content frame some real utterance produced -- on-manifold
+     by construction, so the renderer never sees input outside its training distribution.
+  2. The predictor's objective becomes cross-entropy over categories, whose optimum is the
+     true conditional **distribution** rather than its average. The mean of a distribution
+     over categories is not a category, so the average cannot be emitted even in principle.
+  3. At inference you **sample** -- one plausible utterance, committed to, instead of blur.
+
+**Must be autoregressive.** Sampling all 256 positions independently from their marginals
+gives phoneme soup: frame 5 committing to one utterance, frame 6 to another. `P(code_t |
+code_<t, scene)` is what keeps a sampled utterance internally coherent, for the same reason
+language models are autoregressive rather than predicting all tokens at once.
+
+**Precedent for exactly this failure and exactly this fix:** lip-to-speech went from 65-78%
+WER with mel regression to 50.2 / 44.8% with discrete units (Choi et al., arXiv 2305.19603).
+Same collapse, same remedy. Related: the semantic-token cascade of D5, of which this is the
+concrete, gated version.
+
+**Status: gated on purpose.** Job 436244 fits codebooks at K = 256/512/1024/2048 and then
+feeds **quantized oracle** content through the proven `content_concat_v4` renderer, scoring
+the audio. No predictor is written until quantization is shown not to destroy intelligibility
+-- reconstruction cosine is explicitly not accepted as the test, since this project has
+repeatedly seen a metric move while the audio did not.
+
+**The instrument the predictor stage will need**, designed before results exist: perplexity
+with the ambient input **ablated** (zeroed or shuffled across the batch). If conditioned and
+ablated perplexity are equal, the model has learned generic English phoneme statistics and is
+ignoring the scene -- which would look like healthy training loss while being a total failure.
+This is the `bind_gap` analogue for the discrete stage, and it is cheap to compute per epoch.
+
+**What this direction does NOT fix.** The residual roughness of the oracle-content generations
+is a separate problem -- VAE round-trip plus vocoder plus data scale, already measured at
+0.389 against a 0.372 ceiling, so there is almost no headroom there to win. Deliberately
+deprioritized (user call, 2026-09-02).
+
+---
+
 ---
 
 ## Considered and rejected
