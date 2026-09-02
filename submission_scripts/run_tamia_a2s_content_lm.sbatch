@@ -114,9 +114,18 @@ done
 
 echo
 echo "==================== COMPARISON ACROSS K ===================="
-python - <<'PY'
-import json, os, pathlib
-root = pathlib.Path(os.environ["OUTPUTS_ROOT"]) / "content_lm"
+# `|| true` and an explicit argv path, both learned the hard way (job 436256, 2026-09-02):
+#   1. _salm_env.sh ASSIGNS OUTPUTS_ROOT without exporting it, so os.environ cannot see it in
+#      a subprocess. The path is passed as argv[1] instead of read from the environment.
+#      (The other scripts in this series interpolate it into an UNQUOTED heredoc, which
+#      works; this one uses a quoted heredoc, so it needs argv.)
+#   2. More importantly: this block is COSMETIC, and under `set -e` its failure exited the
+#      whole job non-zero AFTER 145 epochs of training had completed successfully. That
+#      broke the afterok dependency and Slurm cancelled the queued generation job. A summary
+#      must never be able to fail the run it is summarising.
+python - "$OUTPUTS_ROOT" <<'PY' || true
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]) / "content_lm"
 rows = []
 for run in sorted(root.glob("content_lm_k*_v1")):
     h = run / "history.json"
