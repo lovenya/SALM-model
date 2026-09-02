@@ -348,7 +348,7 @@ def main() -> int:
                          "--content-source retrieval when no source is specified")
     ap.add_argument("--content-source", default="none",
                     choices=["none", "oracle", "retrieval", "shuffled", "zero", "predicted",
-                             "conditioner"],
+                             "conditioner", "oracle_quantized"],
                     help="a2s Rank-2 content sequence: target speech (oracle), nearest "
                          "training speech by ambient CLAP (retrieval), another selected "
                          "row's target speech (shuffled), literal zeros, a trained "
@@ -362,6 +362,12 @@ def main() -> int:
     ap.add_argument("--content-predictor-checkpoint", default=None,
                     help="required with --content-source predicted: checkpoint from "
                          "scripts/a2s/train_content_predictor.py")
+    ap.add_argument("--content-codebook", default=None,
+                    help="required with --content-source oracle_quantized: a codebook_k*.pt "
+                         "from scripts/a2s/build_content_codebook.py. THE GATE for the "
+                         "discrete-content plan -- quantized oracle content through the "
+                         "proven renderer must stay near unquantized oracle's 0.389, or the "
+                         "representation is too lossy for any predictor to work on top of")
     ap.add_argument("--content-scale", type=float, default=1.0,
                     help="concat checkpoints only: multiply the projected content map by "
                          "this before concatenation. 1.0 = trained behaviour exactly. NOT "
@@ -490,6 +496,7 @@ def main() -> int:
     # than a generic unconditional sample.
     ctc_head = content_extractor = content_projector = None
     sequence_head = None
+    content_codebook = None
     if args.mode in ("s2a", "a2s", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
@@ -543,6 +550,32 @@ def main() -> int:
             for p in ctc_head.parameters():
                 p.requires_grad_(False)
             content_extractor = MelExtractor(MelConfig(norm_mode="none"), device=args.device)
+
+            if args.content_source == "oracle_quantized":
+                from salm.a2s.content_codebook import ContentCodebook
+
+                if not args.content_codebook:
+                    raise SystemExit(
+                        "--content-source oracle_quantized requires --content-codebook "
+                        "(a codebook_k*.pt from scripts/a2s/build_content_codebook.py)"
+                    )
+                cb_payload = torch.load(
+                    args.content_codebook, map_location=args.device, weights_only=False
+                )
+                if int(cb_payload["content_dim"]) != int(ctc_head.encoder_dim):
+                    raise SystemExit(
+                        f"codebook width {cb_payload['content_dim']} != CTC probe width "
+                        f"{ctc_head.encoder_dim} -- the codebook must be fitted on THIS "
+                        "probe's output space or the codes mean nothing"
+                    )
+                content_codebook = ContentCodebook(
+                    int(cb_payload["num_codes"]), int(cb_payload["content_dim"])
+                ).to(args.device)
+                content_codebook.codes.copy_(cb_payload["codes"].to(args.device))
+                st = cb_payload.get("stats", {})
+                log(f"    content codebook: K={cb_payload['num_codes']} "
+                    f"(held-out rel_l2={st.get('rel_l2', float('nan')):.4f}, "
+                    f"cosine={st.get('cosine', float('nan')):.4f})")
 
             content_predictor = None
             if args.content_source == "predicted":
@@ -720,11 +753,11 @@ def main() -> int:
                         }
                         for i in range(len(batch))
                     ]
-                elif args.content_source == "oracle":
+                elif args.content_source in ("oracle", "oracle_quantized"):
                     source_rows = batch
                     content_meta = [
                         {
-                            "content_source": "oracle",
+                            "content_source": args.content_source,
                             "content_sample_id": row.sample_id,
                             "content_speech_file": str(row.speech_path),
                             "content_retrieval_similarity": None,
@@ -792,7 +825,8 @@ def main() -> int:
                         for _ in batch
                     ]
 
-                if args.content_source in ("retrieval", "oracle", "shuffled"):
+                if args.content_source in ("retrieval", "oracle", "shuffled",
+                                           "oracle_quantized"):
                     content_wavs = [
                         load_waveform_mono_16k(
                             str(row["speech_file"] if isinstance(row, dict) else row.speech_path),
@@ -804,6 +838,12 @@ def main() -> int:
                     content_wav_t = torch.from_numpy(np.stack(content_wavs)).float().to(args.device)
                     content_mel = content_extractor.batch(content_wav_t)
                     content_seq = ctc_head.encode(content_mel)   # (b, 256, 512)
+                    if content_codebook is not None:
+                        # THE GATE. Replace every frame with its nearest real code, then feed
+                        # the SAME proven renderer. Everything else about this lane is
+                        # byte-identical to plain `oracle`, so any difference in the audio is
+                        # attributable to quantization alone.
+                        content_seq = content_codebook.quantize(content_seq.float())
         else:
             wavs = [load_waveform_mono_16k(str(r.speech_path)) for r in batch]
             if args.degrade != "none":
