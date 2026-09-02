@@ -168,6 +168,8 @@ def main() -> int:
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--encode-batch-size", type=int, default=64)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--save-every", type=int, default=20,
+                    help="also write checkpoint_ep<N>.pt every N epochs. The standing repo\n                         rule is that checkpoint-comparison generation covers the full saved\n                         spread, not one pick -- and here that is not optional: scene_gap and\n                         overfitting climb TOGETHER (K=1024: gap +0.026 at ep10 with val_loss\n                         1.32, gap +0.085 at ep144 with val_loss 3.25), so no single epoch is\n                         obviously the right one to listen to.")
     ap.add_argument("--max-minutes", type=float, default=0.0,
                     help="stop cleanly after this much wall clock (0 = no limit). Epoch\n                         time for this model was not measurable before the first run, so\n                         this exists to truncate gracefully with checkpoints written\n                         rather than be SIGKILLed mid-save at the Slurm limit.")
     ap.add_argument("--seed", type=int, default=0)
@@ -261,6 +263,7 @@ def main() -> int:
 
     history = []
     best_gap = -1e9
+    best_loss = 1e9
     rng = np.random.default_rng(args.seed)
     step = 0
     t_start = time.time()
@@ -323,6 +326,16 @@ def main() -> int:
         if m["val_scene_gap"] > best_gap:
             best_gap = m["val_scene_gap"]
             torch.save(payload, run_dir / "checkpoints" / "checkpoint_best.pt")
+        # ALSO keep the best-val_loss checkpoint. Selecting on scene_gap alone picked the most
+        # OVERFIT model in the K=1024 run (ep144: gap +0.085 but val_loss 3.25 against its own
+        # 1.32 minimum at ep10), because the two rise together -- an overfit conditional model
+        # can post a real scene_gap by soft-retrieving the nearest memorised training row. Both
+        # extremes are kept so the comparison is decidable by ear instead of by one metric.
+        if m["val_loss"] < best_loss:
+            best_loss = m["val_loss"]
+            torch.save(payload, run_dir / "checkpoints" / "checkpoint_best_loss.pt")
+        if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
+            torch.save(payload, run_dir / "checkpoints" / f"checkpoint_ep{epoch}.pt")
 
         if args.max_minutes > 0 and (time.time() - t_start) / 60.0 >= args.max_minutes:
             log(f"  stopping at epoch {epoch}: hit --max-minutes={args.max_minutes:g} "
@@ -343,6 +356,12 @@ def main() -> int:
         f"   (unigram baseline {history[-1]['val_unigram_loss']:.4f} -- must beat this)")
     log(f"top1 share    : last={history[-1]['val_argmax_top1_share']:.3f} "
         "(near 1.0 = collapsed onto one code, probably silence)")
+    lo = min(history, key=lambda r: r["val_loss"])
+    log(f"best val_loss : {lo['val_loss']:.4f} @ep{lo['epoch']} "
+        f"(scene_gap there = {lo['val_scene_gap']:+.4f})")
+    log("    checkpoint_best.pt      = max scene_gap  (most overfit)")
+    log("    checkpoint_best_loss.pt = min val_loss   (least overfit)")
+    log("    checkpoint_ep*.pt       = the spread between them -- listen across it")
     log("=" * 74)
     return 0
 

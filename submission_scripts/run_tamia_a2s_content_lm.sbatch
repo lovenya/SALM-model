@@ -70,16 +70,25 @@ source /scratch/l/lovenya/SALM-model/submission_scripts/_salm_env.sh
 
 CB_DIR="${CB_DIR:-$OUTPUTS_ROOT/content_codebook}"
 CTC_CKPT="${CTC_CKPT:-$OUTPUTS_ROOT/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt}"
-EPOCHS="${EPOCHS:-200}"
+# 100 epochs, not 200. MEASURED on the K=1024 run: 0.37 min/epoch, and overfitting sets in
+# hard by ~ep20 (val_loss minimum 1.32 @ep10, then climbing to 3.25 by ep144). Epochs past
+# ~100 buy more scene_gap only by memorising harder, which is the confound we cannot separate
+# by metric -- so the budget covers the interesting range and the saved spread lets the ear
+# decide. 100 ep x 0.37 = ~37 min per K.
+EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 # Epoch time for this model could not be measured before its first run (no GPU forward passes
 # on login nodes), so each K gets a wall-clock budget and truncates GRACEFULLY with its
 # checkpoints written rather than being SIGKILLed at the Slurm limit mid-save. 55 min each
 # leaves ~20 min of the 2:30 for the two code-cache passes and slack.
-MAX_MINUTES="${MAX_MINUTES:-55}"
+MAX_MINUTES="${MAX_MINUTES:-40}"
 # K order matters: the primary configuration runs first so it gets the wall clock if the
 # budget turns out tighter than estimated.
-KS="${KS:-1024 2048}"
+# All three K that survived the listening test (2026-09-02: K=256 was audibly muffled;
+# 512/1024/2048 all sounded fine, which the aggregate metric did NOT predict -- it ranked
+# 512 worst of the three). K=512 is the interesting one: a quarter of 2048's vocabulary to
+# learn from the same 17,596 utterances, and PREDICTION is where all five attempts have died.
+KS="${KS:-512 1024 2048}"
 
 for F in "$CTC_CKPT" "$FEATURES_ROOT/a2s/train/index.jsonl" \
          "$OUTPUTS_ROOT/features_a2s_cond/train/cond_seq.npy" \
@@ -108,6 +117,7 @@ for K in $KS; do
         --epochs "$EPOCHS" \
         --batch-size "$BATCH_SIZE" \
         --max-minutes "$MAX_MINUTES" \
+        --save-every 20 \
         2>&1 | tee -a "$OUTPUTS_ROOT/content_lm/${RUN_NAME}_train.log" \
         || echo "  FAILED: K=$K (continuing to the next K)" >&2
 done

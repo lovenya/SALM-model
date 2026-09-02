@@ -69,12 +69,15 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source /scratch/l/lovenya/SALM-model/submission_scripts/_salm_env.sh
 
-K="${K:-1024}"
-LM_RUN="${LM_RUN:-content_lm_k${K}_v1}"
+# All three K, and for each a SPREAD of checkpoints -- not one pick. Two reasons:
+#   1. Standing repo rule for checkpoint-comparison generation jobs.
+#   2. Specific to this model: scene_gap and overfitting rise TOGETHER, so max-scene_gap and
+#      min-val_loss are different epochs with different failure characters, and no metric
+#      settles which produces better speech. The ear does.
+KS="${KS:-512 1024 2048}"
+CKPT_TAGS="${CKPT_TAGS:-checkpoint_best_loss checkpoint_ep39 checkpoint_best}"
 # checkpoint_best is selected on val_scene_gap, NOT val_loss -- a checkpoint with the better
 # loss and no scene_gap is precisely the failure this pipeline is built to detect.
-LM_CKPT="${LM_CKPT:-$OUTPUTS_ROOT/content_lm/$LM_RUN/checkpoints/checkpoint_best.pt}"
-CB="${CB:-$OUTPUTS_ROOT/content_codebook/codebook_k${K}.pt}"
 CTC_CKPT="${CTC_CKPT:-$OUTPUTS_ROOT/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt}"
 RENDERER="${RENDERER:-$RUNS_ROOT/a2s_audioldm_clapseq_xformer/content_concat_v4/checkpoints/checkpoint_best.pt}"
 NUM_GEN="${NUM_GEN:-16}"
@@ -82,40 +85,54 @@ TEMPS="${TEMPS:-0.7 1.0}"
 STAMP="$(TZ=America/Toronto date +%Y%m%d_%H%M)"
 OUT_ROOT="$OUTPUTS_ROOT/generations/content_lm_gen_${STAMP}"
 
-for F in "$LM_CKPT" "$CB" "$CTC_CKPT" "$RENDERER"; do
+for F in "$CTC_CKPT" "$RENDERER"; do
     [[ -f "$F" ]] || { echo "MISSING: $F" >&2; exit 1; }
 done
 
-salm_print_header "ContentLM generation: ambient -> sampled codes -> frozen renderer (K=$K)"
-echo "LM checkpoint: $LM_CKPT"
-python - <<PY
-import json, pathlib
-h = pathlib.Path("$OUTPUTS_ROOT/content_lm/$LM_RUN/history.json")
-if h.exists():
+salm_print_header "ContentLM generation: ambient -> sampled codes -> frozen renderer"
+echo "K values:        $KS"
+echo "checkpoint tags: $CKPT_TAGS"
+echo "temperatures:    $TEMPS"
+
+python - "$OUTPUTS_ROOT" "$KS" <<'PY' || true
+import json, pathlib, sys
+root, ks = pathlib.Path(sys.argv[1]) / "content_lm", sys.argv[2].split()
+for k in ks:
+    h = root / f"content_lm_k{k}_v1" / "history.json"
+    if not h.exists():
+        print(f"  K={k}: no history.json"); continue
     hist = json.loads(h.read_text())
-    best = max(hist, key=lambda r: r["val_scene_gap"])
-    print(f"  training reached {len(hist)} epochs")
-    print(f"  best val_scene_gap = {best['val_scene_gap']:+.4f} @ep{best['epoch']}  "
-          f"(val_loss {best['val_loss']:.4f} vs unigram {best['val_unigram_loss']:.4f})")
-    print(f"  last val_scene_gap = {hist[-1]['val_scene_gap']:+.4f}")
+    bg = max(hist, key=lambda r: r["val_scene_gap"])
+    bl = min(hist, key=lambda r: r["val_loss"])
+    print(f"  K={k}: {len(hist)} eps | max gap {bg['val_scene_gap']:+.4f} @ep{bg['epoch']} "
+          f"(loss {bg['val_loss']:.3f}) | min loss {bl['val_loss']:.3f} @ep{bl['epoch']} "
+          f"(gap {bl['val_scene_gap']:+.4f})")
 PY
 
-# ---------------------------------------------------------------- the real lane
-for T in $TEMPS; do
-    tag="lm_t${T}"
-    out_dir="$OUT_ROOT/$tag"
-    mkdir -p "$out_dir"
-    echo
-    echo "=== codebook_lm, temperature=$T (AMBIENT AUDIO ONLY) ==="
-    CUDA_VISIBLE_DEVICES=0 python -m salm.generate --mode a2s --direction a2s \
-        --checkpoint "$RENDERER" \
-        --content-source codebook_lm \
-        --content-lm-checkpoint "$LM_CKPT" \
-        --content-lm-temperature "$T" \
-        --ctc-checkpoint "$CTC_CKPT" \
-        --split val --num-samples "$NUM_GEN" \
-        --out-dir "$out_dir" --copy-reference \
-        2>&1 | tee "$out_dir.log" || echo "  FAILED: temperature=$T (continuing)" >&2
+# ---------------------------------------------------------------- the real lanes
+for K in $KS; do
+  for TAG in $CKPT_TAGS; do
+    LM_CKPT="$OUTPUTS_ROOT/content_lm/content_lm_k${K}_v1/checkpoints/${TAG}.pt"
+    if [[ ! -f "$LM_CKPT" ]]; then
+        echo "  skip (absent): $LM_CKPT" >&2
+        continue
+    fi
+    for T in $TEMPS; do
+        out_dir="$OUT_ROOT/k${K}__${TAG#checkpoint_}__t${T}"
+        mkdir -p "$out_dir"
+        echo
+        echo "=== K=$K $TAG temperature=$T (AMBIENT AUDIO ONLY) ==="
+        CUDA_VISIBLE_DEVICES=0 python -m salm.generate --mode a2s --direction a2s \
+            --checkpoint "$RENDERER" \
+            --content-source codebook_lm \
+            --content-lm-checkpoint "$LM_CKPT" \
+            --content-lm-temperature "$T" \
+            --ctc-checkpoint "$CTC_CKPT" \
+            --split val --num-samples "$NUM_GEN" \
+            --out-dir "$out_dir" --copy-reference \
+            2>&1 | tee "$out_dir.log" || echo "  FAILED: K=$K $TAG t=$T (continuing)" >&2
+    done
+  done
 done
 
 # ---------------------------------------------------------------- controls
@@ -128,15 +145,23 @@ CUDA_VISIBLE_DEVICES=0 python -m salm.generate --mode a2s --direction a2s \
     --out-dir "$OUT_ROOT/zero" --copy-reference \
     2>&1 | tee "$OUT_ROOT/zero.log" || echo "  FAILED: zero control" >&2
 
-mkdir -p "$OUT_ROOT/oracle_quantized"
-echo
-echo "=== oracle_quantized K=$K (the ceiling for THIS pipeline) ==="
-CUDA_VISIBLE_DEVICES=0 python -m salm.generate --mode a2s --direction a2s \
-    --checkpoint "$RENDERER" --content-source oracle_quantized --content-codebook "$CB" \
-    --ctc-checkpoint "$CTC_CKPT" \
-    --split val --num-samples "$NUM_GEN" \
-    --out-dir "$OUT_ROOT/oracle_quantized" --copy-reference \
-    2>&1 | tee "$OUT_ROOT/oracle_quantized.log" || echo "  FAILED: oracle_quantized" >&2
+# One ceiling per K: the best this pipeline could do at that codebook coarseness if the
+# predictor were perfect. Without it, a mediocre lm_* score is unattributable between
+# "quantization is lossy at this K" and "the predictor is weak".
+for K in $KS; do
+    CB="$OUTPUTS_ROOT/content_codebook/codebook_k${K}.pt"
+    [[ -f "$CB" ]] || continue
+    out_dir="$OUT_ROOT/oracle_quantized_k${K}"
+    mkdir -p "$out_dir"
+    echo
+    echo "=== oracle_quantized K=$K (the ceiling for THIS pipeline at this K) ==="
+    CUDA_VISIBLE_DEVICES=0 python -m salm.generate --mode a2s --direction a2s \
+        --checkpoint "$RENDERER" --content-source oracle_quantized --content-codebook "$CB" \
+        --ctc-checkpoint "$CTC_CKPT" \
+        --split val --num-samples "$NUM_GEN" \
+        --out-dir "$out_dir" --copy-reference \
+        2>&1 | tee "$out_dir.log" || echo "  FAILED: oracle_quantized K=$K" >&2
+done
 
 # ---------------------------------------------------------------- score
 echo
