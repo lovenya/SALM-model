@@ -2051,3 +2051,48 @@ representation and/or data scale as the shared bottleneck, not at any one inject
 or training objective. Per the pre-registered plan, the designated next move is a warm start
 from a model that already has speech (VoiceLDM, Apache-2.0, ~6,750h) rather than a fourth
 mechanism -- see `docs/RESEARCH_DIRECTIONS.md` D4.
+
+## 2026-09-02: phase 2 -- same failure, now WITHOUT the confound
+
+**The fix applied.** Job 434417 froze `content_concat_v4`'s proven unet + content_projector
+(the exact weights that rendered oracle content near-verbatim) and warm-started the
+conditioner from the same checkpoint. Only the conditioner and a fresh `sequence_head`
+trained, against a renderer guaranteed capable of using good content -- removing phase 1's
+confound where the renderer was never once shown real content. Full mechanism in
+`configs/exp/conditioner_sequence_phase2.yaml`.
+
+**Verified before trusting the result:** the load/freeze/warm-start path fired exactly as
+designed, no silent fallback --
+```
+loading renderer (unet + content_projector) from content_concat_v4/checkpoints/checkpoint_best.pt ...
+renderer FROZEN: unet + content_projector will receive zero gradient.
+conditioner warm-started from renderer_checkpoint (still trainable)
+```
+
+**Result (250 epochs, 1:21:45 wall):**
+
+| epoch | val_content_bind_gap |
+|---|---|
+| 0 | -0.00011 |
+| 100 | +0.00032 |
+| 200 | +0.00019 |
+| 249 | +0.00055 (run best: +0.00059 @ ep202) |
+
+Flat at noise level the entire run -- same order of magnitude as phase 1's (+0.0000 to
++0.0004), ~100x below the pre-registered +0.05 success bar. `val_x0_rel_mse` also flat
+(0.378 -> 0.359, no meaningful improvement).
+
+**This result is stronger evidence than phase 1's, not weaker, because the confound is gone.**
+The renderer here is not a co-adapting unknown -- it is the exact checkpoint proven to render
+real content into near-verbatim speech. A repeat of the same near-zero bind_gap under these
+conditions rules out "the renderer never learned content" as an explanation. What remains:
+either ~24h of paired speech does not carry a learnable ambience->content mapping through
+this renderer's content distribution, or the CLAP ambient representation itself does not
+carry recoverable phonetic content (consistent with 434204's thin, fast-overfitting retrieval
+signal: 14.6x chance at epoch 8, declining thereafter).
+
+**Next per the pre-registered plan for this outcome:** a warm start from a model that already
+has speech (VoiceLDM, Apache-2.0, ~6,750h of speech vs. our ~24h) rather than a fifth
+injection mechanism on the same data. Intelligibility scoring (ASR-based, matching the
+instrument used to confirm phase 1's failure) is queued to run before treating this as final
+-- see `docs/RESEARCH_DIRECTIONS.md` D4 for the warm-start plan.
