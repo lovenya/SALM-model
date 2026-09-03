@@ -371,6 +371,11 @@ def main() -> int:
                          "Lower commits harder (toward argmax, i.e. back toward the mean "
                          "collapse this design exists to avoid); higher is more diverse and "
                          "less coherent. THE knob worth sweeping first")
+    ap.add_argument("--content-lm-dur-temperature", type=float, default=0.0,
+                    help="run-length checkpoints only: separate temperature for the DURATION "
+                         "head (0 = use --content-lm-temperature). Separable because duration "
+                         "is far lower-entropy than code identity (median 1, mean ~1.8), so "
+                         "it usually wants sharper sampling than the codes do")
     ap.add_argument("--content-lm-top-k", type=int, default=0,
                     help="codebook_lm: truncate sampling to the k most likely codes (0=off)")
     ap.add_argument("--content-lm-top-p", type=float, default=0.0,
@@ -511,6 +516,7 @@ def main() -> int:
     sequence_head = None
     content_codebook = None
     content_lm = None
+    lm_is_dedup = False
     if args.mode in ("s2a", "a2s", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
@@ -604,16 +610,44 @@ def main() -> int:
                 )
                 if int(lm_payload["num_codes"]) != int(lm_payload["codes"].shape[0]):
                     raise SystemExit("ContentLM checkpoint's codebook size disagrees with itself")
-                content_lm = ContentLM(
-                    num_codes=int(lm_payload["num_codes"]),
-                    ambient_dim=int(lm_payload["ambient_dim"]),
-                    content_frames=int(lm_payload["content_frames"]),
-                    d_model=int(lm_payload["d_model"]),
-                    n_layers=int(lm_payload["layers"]),
-                    n_heads=int(lm_payload["heads"]),
-                ).to(args.device)
-                content_lm.load_state_dict(lm_payload["model"])
-                content_lm.eval()
+
+                # Frame-level vs run-length is a property of the CHECKPOINT, not a flag the
+                # caller should have to remember and match. Getting it wrong would load the
+                # wrong architecture and either crash on a state_dict mismatch or, worse,
+                # silently sample in the wrong representation.
+                if lm_payload.get("dedup"):
+                    from salm.a2s.content_lm_dedup import ContentLMDedup
+
+                    content_lm = ContentLMDedup(
+                        num_codes=int(lm_payload["num_codes"]),
+                        max_run=int(lm_payload["max_run"]),
+                        ambient_dim=int(lm_payload["ambient_dim"]),
+                        max_tokens=int(lm_payload["max_tokens"]),
+                        d_model=int(lm_payload["d_model"]),
+                        n_layers=int(lm_payload["layers"]),
+                        n_heads=int(lm_payload["heads"]),
+                    ).to(args.device)
+                    content_lm.load_state_dict(lm_payload["model"])
+                    content_lm.eval()
+                    lm_is_dedup = True
+                    mm = lm_payload.get("metrics", {})
+                    log(f"    ContentLM (RUN-LENGTH): "
+                        f"{content_lm.num_parameters()/1e6:.2f}M params, "
+                        f"K={content_lm.num_codes}, max_run={content_lm.max_run}, "
+                        f"epoch={lm_payload.get('epoch')}, "
+                        f"scene_gap={mm.get('val_scene_gap', float('nan')):+.4f}, "
+                        f"dur_acc={mm.get('val_dur_acc', float('nan')):.3f}")
+                else:
+                    content_lm = ContentLM(
+                        num_codes=int(lm_payload["num_codes"]),
+                        ambient_dim=int(lm_payload["ambient_dim"]),
+                        content_frames=int(lm_payload["content_frames"]),
+                        d_model=int(lm_payload["d_model"]),
+                        n_layers=int(lm_payload["layers"]),
+                        n_heads=int(lm_payload["heads"]),
+                    ).to(args.device)
+                    content_lm.load_state_dict(lm_payload["model"])
+                    content_lm.eval()
                 # The codebook rides along inside the LM checkpoint, so the codes the model
                 # was trained to predict and the vectors they dequantize to can never drift
                 # apart -- a mismatch there would be silent and total.
@@ -626,10 +660,11 @@ def main() -> int:
                         f"ContentLM codebook width {content_codebook.content_dim} != CTC probe "
                         f"width {ctc_head.encoder_dim}"
                     )
-                m = lm_payload.get("metrics", {})
-                log(f"    ContentLM: {content_lm.num_parameters()/1e6:.2f}M params, "
-                    f"K={content_lm.num_codes}, epoch={lm_payload.get('epoch')}, "
-                    f"scene_gap={m.get('val_scene_gap', float('nan')):+.4f}")
+                    m = lm_payload.get("metrics", {})
+                    log(f"    ContentLM (frame-level): "
+                        f"{content_lm.num_parameters()/1e6:.2f}M params, "
+                        f"K={content_lm.num_codes}, epoch={lm_payload.get('epoch')}, "
+                        f"scene_gap={m.get('val_scene_gap', float('nan')):+.4f}")
                 log(f"    sampling: temperature={args.content_lm_temperature} "
                     f"top_k={args.content_lm_top_k} top_p={args.content_lm_top_p}")
 
@@ -861,13 +896,38 @@ def main() -> int:
                     # on-manifold by construction (every frame is a real codebook entry).
                     # Sampling, not argmax: argmax would walk straight back into the
                     # conditional mean this whole design exists to escape.
-                    sampled = content_lm.sample(
-                        feats.float(),
-                        temperature=args.content_lm_temperature,
-                        top_k=args.content_lm_top_k,
-                        top_p=args.content_lm_top_p,
-                        generator=lm_generator,
-                    )
+                    if lm_is_dedup:
+                        # RUN-LENGTH variant: sample (code, duration) pairs, then expand back
+                        # onto the 256-frame grid the concat channel requires. The expansion
+                        # is the exact inverse of training's dedup, so no resampling or
+                        # interpolation enters here -- see salm/a2s/content_dedup.py.
+                        from salm.a2s.content_dedup import expand_sequence
+                        from salm.a2s.ctc_probe import CTC_FRAMES_OUT as CTC_FRAMES
+
+                        tok_rows, dur_rows = content_lm.sample(
+                            feats.float(),
+                            total_frames=CTC_FRAMES,
+                            temperature=args.content_lm_temperature,
+                            dur_temperature=(args.content_lm_dur_temperature or None),
+                            top_k=args.content_lm_top_k,
+                            generator=lm_generator,
+                        )
+                        frames = np.stack([
+                            expand_sequence(np.asarray(t), np.asarray(d), total=CTC_FRAMES)
+                            for t, d in zip(tok_rows, dur_rows)
+                        ])
+                        sampled = torch.from_numpy(frames).long().to(args.device)
+                        n_tok = [len(t) for t in tok_rows]
+                        log(f"      sampled {n_tok[0]} run-length tokens -> {CTC_FRAMES} "
+                            f"frames (row 0); batch mean {np.mean(n_tok):.1f} tokens")
+                    else:
+                        sampled = content_lm.sample(
+                            feats.float(),
+                            temperature=args.content_lm_temperature,
+                            top_k=args.content_lm_top_k,
+                            top_p=args.content_lm_top_p,
+                            generator=lm_generator,
+                        )
                     content_seq = content_codebook.dequantize(sampled)
                     uniq = int(sampled[0].unique().numel())
                     log(f"      sampled codes: {uniq} distinct of "
