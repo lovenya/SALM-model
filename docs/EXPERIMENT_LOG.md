@@ -2229,15 +2229,35 @@ train loss ~9x below val loss, val_loss +105-120% from its ep7 minimum.
 
 **Every LM lane crushed the zero-content control.** Best 0.4438 against `zero` at 0.9669.
 
-**Scene understanding demonstrably works.** The decisive evidence is cross-checkpoint
-consistency: the same clip yields the same topic, and sometimes the same proper noun, from
-independently-trained checkpoints.
+**Scene understanding works, and the claim needs stating at the right strength.** CORRECTED
+2026-09-03 after the user challenged the evidential basis -- the first version of this entry
+overstated it in two ways worth recording, since both are easy mistakes to repeat.
 
-| sample | ep19 | ep39 | ep99 |
+*The overstatement.* It cited consistency across ep19/ep39/ep99 as coming from
+"independently-trained checkpoints". Those are SEQUENTIAL SNAPSHOTS OF ONE RUN -- ep99 is
+ep39 trained further -- so agreement between them is close to guaranteed and proves almost
+nothing. It also cited the same proper noun ("Max") recurring across them, which rested
+entirely on that invalid comparison. A second confound: every generation lane samples with
+the same RNG seed, so similar models yield similar text partly from identical sampling noise
+rather than from conditioning.
+
+*The proper test* is across the three K runs, which ARE separately trained on different
+codebooks. Checked against the ambient captions rather than the reference transcripts:
+
+| ambient caption | k512 | k1024 | k2048 |
 |---|---|---|---|
-| NBpZiMOvb6Y | "**Gotta** check the **oil**..." | "**Gotta** hurry..." | "**gotta** catch up..." |
-| bOWkhocwjVs | "hear that **click**... **Engines** shake" | "tighten those **bolts**" | "Secure the **cargo**" |
-| 2ALeDpopSeE | "**Max**, something's moving" | "**Max**, I heard them" | "**Max**, come here buddy" |
+| A motorcycle is started | "check the **engine's running**" | (weak) | "This thing **won't start**" |
+| A motorcycle idles nearby | "old **engine**" | "try **starting the car**... that **noise**" | (weak) |
+| An engine buzzing with banging | "This **noise** is driving me nuts" | (weak) | "**tighten those bolts** before this **starts**" |
+| A puppy barking | "Hey there little **buddies**" | "making the **body growl**" | "**Max**, I heard them" |
+
+Roughly **two of three independently-trained lanes per clip are clearly scene-appropriate** --
+engine/noise/mechanical talk for engine scenes, creature-directed talk for the puppy. Well
+above chance, and the defensible claim. "Max" appears in k2048 ONLY (k512 said "little
+buddies", k1024 "body growl"), so cross-model convergence is on the DOMAIN, not the wording.
+
+Verified non-cheating from the recorded metadata, not asserted: the LM lanes record
+`content_speech_file: None` while `oracle_quantized` records the exact speech file it opened.
 
 Fully coherent, scene-appropriate sentences appear: *"Gotta check the oil before it warms up."*
 *"Hey! Can you tighten those bolts before this starts too hard?"* *"This thing won't start."*
