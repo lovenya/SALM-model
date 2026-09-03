@@ -4,7 +4,7 @@
 # offline-resolution failures when only HF_HOME/TRANSFORMERS_CACHE were set, because
 # huggingface_hub reads HF_HUB_CACHE / HUGGINGFACE_HUB_CACHE separately.
 
-REPO=/scratch/l/lovenya/SALM-model
+REPO="${SALM_REPO:-/scratch/l/lovenya/SALM-model}"
 cd "$REPO"
 
 module --force purge
