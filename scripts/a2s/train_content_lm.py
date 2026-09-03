@@ -166,6 +166,8 @@ def main() -> int:
     ap.add_argument("--layers", type=int, default=6)
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--label-smoothing", type=float, default=0.0,
+                    help="applied to the TRAINING cross-entropy only, never to the\n                         reported val_loss -- smoothing the eval loss would make it\n                         incomparable to every previous run. Motivated by the codes not\n                         being arbitrary categories: they are k-means centroids in a\n                         512-d space, so predicting a NEIGHBOURING centroid is nearly\n                         right and hard cross-entropy scores it fully wrong. Keep it\n                         mild -- softer targets broaden the sampled distribution, which\n                         commits less and could worsen coherence.")
     ap.add_argument("--encode-batch-size", type=int, default=64)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--save-every", type=int, default=20,
@@ -285,7 +287,10 @@ def main() -> int:
                  c[:, :-1]], dim=1
             )
             logits = model(a, inp)
-            loss = F.cross_entropy(logits.reshape(-1, model.num_codes), c.reshape(-1))
+            loss = F.cross_entropy(
+                logits.reshape(-1, model.num_codes), c.reshape(-1),
+                label_smoothing=args.label_smoothing,
+            )
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -303,6 +308,12 @@ def main() -> int:
         m["train_loss"] = run_loss / max(nb, 1)
         m["epoch_minutes"] = (time.time() - t0) / 60.0
         m["lr"] = float(opt.param_groups[0]["lr"])
+        # Stamped every epoch so a history.json is self-describing -- comparing runs later
+        # should never require going back to the sbatch to recover what varied.
+        m["cfg_dropout"] = args.dropout
+        m["cfg_weight_decay"] = args.weight_decay
+        m["cfg_label_smoothing"] = args.label_smoothing
+        m["cfg_layers"] = args.layers
         history.append(m)
 
         log(f"  epoch {epoch:03d} train={m['train_loss']:.4f} val={m['val_loss']:.4f} "
