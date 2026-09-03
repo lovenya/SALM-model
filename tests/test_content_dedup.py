@@ -146,3 +146,59 @@ def test_stats_match_a_hand_case():
     assert s["mean_tokens"] == 3.0          # 2 and 4
     assert s["max_tokens"] == 4 and s["min_tokens"] == 2
     assert abs(s["compression"] - 4 / 3) < 1e-9
+
+
+def test_max_run_splits_rather_than_clamps_and_stays_exact():
+    # A 100-frame run with max_run=32 must become 32+32+32+4 of the SAME code, and expanding
+    # must still reproduce the original exactly. Clamping instead would drop 68 frames.
+    codes = np.full(100, 42)
+    tok, dur = dedup_sequence(codes, max_run=32)
+    assert tok.tolist() == [42, 42, 42, 42]
+    assert dur.tolist() == [32, 32, 32, 4]
+    assert dur.max() <= 32
+    assert np.array_equal(expand_sequence(tok, dur), codes)
+
+
+def test_max_run_bounds_every_duration_on_real_shaped_data():
+    rng = np.random.default_rng(7)
+    # heavy repetition, like silence stretches
+    codes = np.repeat(rng.integers(0, 5, size=20), rng.integers(1, 60, size=20))
+    for cap in (4, 16, 32):
+        tok, dur = dedup_sequence(codes, max_run=cap)
+        assert dur.max() <= cap
+        assert np.array_equal(expand_sequence(tok, dur), codes)
+
+
+def test_max_run_is_a_noop_when_runs_are_short():
+    codes = np.array([1, 1, 2, 3, 3])
+    a = dedup_sequence(codes)
+    b = dedup_sequence(codes, max_run=32)
+    assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
+
+
+def test_max_run_rejects_zero():
+    try:
+        dedup_sequence(np.array([1, 1]), max_run=0)
+        raise AssertionError("should reject max_run < 1")
+    except ValueError:
+        pass
+
+
+def test_merged_frames_take_the_run_code_not_their_own():
+    # With merging, an absorbed frame must not change the run's code -- otherwise expand()
+    # would emit a code the run never represented.
+    cb = np.array([[1.0, 0.0], [0.999, 0.0447], [0.0, 1.0]])
+    cb = cb / np.linalg.norm(cb, axis=1, keepdims=True)
+    tok, dur = dedup_sequence(np.array([0, 1, 1]), cb, merge_cosine=0.99)
+    assert tok.tolist() == [0] and dur.tolist() == [3]
+    assert expand_sequence(tok, dur).tolist() == [0, 0, 0]
+
+
+def test_merge_and_max_run_compose():
+    cb = np.array([[1.0, 0.0], [0.999, 0.0447]])
+    cb = cb / np.linalg.norm(cb, axis=1, keepdims=True)
+    codes = np.array([0, 1] * 30)          # all mergeable into one long run
+    tok, dur = dedup_sequence(codes, cb, merge_cosine=0.99, max_run=8)
+    assert dur.max() <= 8
+    assert dur.sum() == len(codes)
+    assert set(tok.tolist()) == {0}

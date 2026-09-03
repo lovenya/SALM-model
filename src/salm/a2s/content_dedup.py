@@ -44,6 +44,7 @@ def dedup_sequence(
     codes: np.ndarray,
     codebook_unit: np.ndarray | None = None,
     merge_cosine: float = 0.0,
+    max_run: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     One utterance: (T,) frame codes -> (tokens, durations), both 1-D, summing to T.
@@ -52,6 +53,13 @@ def dedup_sequence(
     that cosine of the RUN'S OPENING centroid -- the opener, not the previous frame, so a run
     cannot drift arbitrarily far through a chain of individually-close steps. Requires
     `codebook_unit`, the L2-normalised codebook.
+
+    `max_run` SPLITS a longer run into several tokens of the same code rather than clamping
+    its duration. This matters: the duration head needs a bounded vocabulary (measured run
+    lengths are median 1 and mean ~1.8 but reach ~160 frames on silence, and a head over 160
+    classes would be almost entirely dead), yet clamping a 163-frame run to 32 would silently
+    discard 131 frames and break the round-trip property this codec is built on. Splitting
+    keeps `expand_sequence` exact while bounding every duration to <= max_run.
     """
     codes = np.asarray(codes).ravel()
     if codes.size == 0:
@@ -59,17 +67,30 @@ def dedup_sequence(
     if merge_cosine > 0.0 and codebook_unit is None:
         raise ValueError("merge_cosine > 0 requires codebook_unit (L2-normalised codebook)")
 
+    if max_run is not None and max_run < 1:
+        raise ValueError("max_run must be >= 1")
+
     tokens = [int(codes[0])]
     durations = [1]
+
+    def _extend(code: int) -> None:
+        """Grow the current run, opening a new token of the same code at the max_run bound."""
+        if max_run is not None and durations[-1] >= max_run:
+            tokens.append(code)
+            durations.append(1)
+        else:
+            durations[-1] += 1
+
     for x in codes[1:]:
         x = int(x)
         cur = tokens[-1]
         if x == cur:
-            durations[-1] += 1
+            _extend(cur)
             continue
         if merge_cosine > 0.0:
             if float(codebook_unit[cur] @ codebook_unit[x]) >= merge_cosine:
-                durations[-1] += 1
+                # Absorbed into the run, so it keeps the RUN'S code, not its own.
+                _extend(cur)
                 continue
         tokens.append(x)
         durations.append(1)
@@ -114,6 +135,7 @@ def dedup_batch(
     merge_cosine: float = 0.0,
     max_tokens: int | None = None,
     pad_token: int = -1,
+    max_run: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     (N, T) frame codes -> (tokens, durations, lengths), the first two padded to `max_tokens`.
@@ -123,7 +145,7 @@ def dedup_batch(
     indistinguishable, and a silent off-by-one there would corrupt every sequence.
     """
     codes = np.asarray(codes)
-    rows = [dedup_sequence(r, codebook_unit, merge_cosine) for r in codes]
+    rows = [dedup_sequence(r, codebook_unit, merge_cosine, max_run) for r in codes]
     lengths = np.asarray([len(t) for t, _ in rows], dtype=np.int64)
     cap = int(max_tokens or lengths.max())
     if lengths.max() > cap:
