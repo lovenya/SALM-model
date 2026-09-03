@@ -1,6 +1,6 @@
 ---
 name: log-experiment
-description: Record completed experiments in docs/EXPERIMENT_LOG.md, portable lessons in docs/LEARNINGS.md, and live/rejected directions in docs/RESEARCH_DIRECTIONS.md -- what we tried, why, what the numbers were, and what we concluded. Invoke as /log-experiment.
+description: Record the experimental history across all four continuously-maintained docs -- EXPERIMENT_LOG.md (what we tried, why, the real numbers, the verdict), LEARNINGS.md (transferable ML lessons, written to read cold), RESEARCH_DIRECTIONS.md (live and rejected directions), OPEN_ITEMS.md (the live TODO/decision queue). Invoke as /log-experiment.
 ---
 
 # Log an experiment
@@ -13,13 +13,28 @@ its *history and reasoning* — the thing that is impossible to reconstruct late
 The test of a good entry: six months from now, could someone read it and know why a decision
 was made, without asking anyone?
 
-## Three destinations, different jobs
+## Four destinations, different jobs
 
-| doc | holds | lifetime |
-|---|---|---|
-| `docs/EXPERIMENT_LOG.md` | dated entries per experiment: hypothesis, config, numbers, verdict | append-only history |
-| `docs/LEARNINGS.md` | portable lessons that would apply on a different project | grows slowly, high bar |
-| `docs/RESEARCH_DIRECTIONS.md` | live directions (D1..Dn), and rejected ones with reasons | edited in place as status changes |
+Check every one of these on each invocation. The most common failure of this skill is
+updating the log and silently leaving the other three stale.
+
+| doc | holds | who it is for | lifetime |
+|---|---|---|---|
+| `docs/EXPERIMENT_LOG.md` | dated entry per experiment: the question, the config, the real numbers, the verdict against pre-registered criteria, what it changes | us, and the eventual paper | append-only history |
+| `docs/LEARNINGS.md` | transferable knowledge — the mechanism behind a failure, stated so it is useful on a *different* project. Lovenya's reference for interviews and for general ML judgement, so write it to be read cold, without this project's context | Lovenya, long after this project | grows slowly, high bar |
+| `docs/RESEARCH_DIRECTIONS.md` | the idea space: live directions (D1..Dn) with status, and "considered and rejected" with the reason | us, when choosing what to try next | edited in place as status changes |
+| `docs/OPEN_ITEMS.md` | the live TODO and decision queue — what still needs deciding, building, or is blocked | Lovenya + agents between sessions | edited in place; completed items struck through, never deleted |
+
+`OPEN_ITEMS.md` has its own conventions, stated at the top of that file, and they must be
+followed: **[DISCUSS]** needs a decision from Lovenya, **[IMPL]** is agreed and just needs
+doing, **[BLOCKED]** waits on something named, and finished items are struck through with
+their outcome and a pointer into the experiment log rather than removed. Items we decided
+*against* stay struck through too — they are the easiest to forget and the most likely to be
+re-proposed.
+
+`CONTEXT.md` and `README.md` are NOT this skill's job — they describe the project's current
+state and belong to `/update-docs`. If a result changed the project's state as well as its
+history, say so and suggest running that skill too.
 
 ## What every EXPERIMENT_LOG entry must contain
 
@@ -58,11 +73,16 @@ was made, without asking anyone?
 
 ## LEARNINGS.md has a higher bar
 
-Only add an entry if it would be true and useful on a **different project**. "Our CLAP
-encoder was misconfigured" is a log entry; "`from_pretrained` on a mismatched class silently
-returns a randomly-initialised model, so assert a numeric invariant rather than the absence
-of an exception" is a learning. Each entry: the failure, the mechanism, and what to do
-instead.
+Only add an entry if it would be true and useful on a **different project, in a different
+domain**. "Our CLAP encoder was misconfigured" is a log entry; "`from_pretrained` on a
+mismatched class silently returns a randomly-initialised model, so assert a numeric invariant
+rather than the absence of an exception" is a learning.
+
+Write these to be read **cold**, by someone with no knowledge of this project — including
+Lovenya in an interview two years from now. That means: name the general principle first,
+then use the concrete incident as the illustration, not the other way round. Each entry gets
+the failure, the *mechanism* that caused it, and what to do instead. A learning without a
+mechanism is an anecdote.
 
 ## Procedure
 
@@ -73,5 +93,8 @@ instead.
 4. Update `RESEARCH_DIRECTIONS.md` if a direction's status changed (activated, killed,
    partially confirmed) — including moving things into "Considered and rejected" with the
    reason.
-5. Add to `LEARNINGS.md` only if the bar above is met.
-6. Commit with a message that states the finding, not just "update docs".
+5. Update `OPEN_ITEMS.md`: strike through what the experiment settled (with its outcome and a
+   pointer into the log), and add whatever it newly raised. This is the step most often
+   skipped, and skipping it is why decisions get re-litigated across sessions.
+6. Add to `LEARNINGS.md` only if the bar above is met.
+7. Commit with a message that states the finding, not just "update docs".

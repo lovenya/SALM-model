@@ -19,6 +19,55 @@ we chose against it.
 
 ## Waiting to run
 
+- **[IMPL] Deduplication + duration predictor (granularity fix).** The agreed next build as of
+  2026-09-03. Not yet implemented. Collapse consecutive identical content codes (256 frames ->
+  ~40-80 tokens), so the LM plans over phone-like rather than frame-like units; needs a
+  duration predictor to re-expand to the 256 frames the concat channel requires. Justified by
+  elimination, not guesswork: more epochs ruled out (job 438059, flat epoch ladder) and
+  regularization ruled out (job 438062, scene_gap at the loss minimum invariant at +0.021
+  across seven configs). See the 2026-09-02/03 entry in `EXPERIMENT_LOG.md`.
+
+## Decisions needed (added 2026-09-03)
+
+- **[DISCUSS] Which K to carry forward.** The metric and the ear disagree. `inter_asr_dist`
+  ranks K=2048 best for generation (0.4438) while `val_scene_gap` and `val_loss` both favour
+  K=512, and the listening test called 512/1024/2048 all acceptable with 256 muffled. K=512 is
+  a quarter of 2048's vocabulary to learn from 17,596 utterances, which matters because
+  prediction — not reconstruction — is the binding constraint. Not decided.
+
+- **[DISCUSS] Contrastive / negative-scene conditioning.** Raised by Lovenya as a VICReg-style
+  idea; refined to a term that turns `val_scene_gap` from a diagnostic into a training
+  objective (reward the true scene pairing, penalise a mismatched one). Deliberately held: the
+  +0.021 invariance suggests the ceiling may be in the data rather than the objective, so this
+  should follow the dedup result rather than precede it. Not implemented — no code exists.
+
+- **[DISCUSS] Transcript coherence needs its own metric.** `inter_asr_dist` measures whether
+  words are present and clear, not whether they form sentences, and it demonstrably rewards
+  clarity over correctness (LM lanes scored *better* than their own oracle ceiling). The
+  observed failure — "3-4 words make sense then another group starts" — has no number attached
+  to it. Candidate: perplexity of the transcript under a language model. Would be a new
+  experiment; not started.
+
+## Deliberately chosen against, 2026-09-03 (so we stop re-proposing these)
+
+- ~~**[DROPPED] More training epochs to fix coherence.**~~ Job 438059's full checkpoint spread
+  is flat-to-noisy along the epoch ladder (k2048 t0.7: ep39 0.4666 vs ep99 0.4892), and ep19
+  produced some of the best transcripts. More epochs do not help.
+- ~~**[DROPPED] Regularization / capacity as the coherence fix.**~~ Job 438062: tripling
+  dropout and 10x-ing weight decay moved the val_loss minimum by 3 epochs and nothing else;
+  fewer layers changed nothing; label smoothing actively hurt. The generalizable scene signal
+  is invariant at +0.021.
+- ~~**[DROPPED] Label smoothing on the code targets.**~~ Motivated (codes are k-means
+  centroids, so a neighbour is nearly right) but measured worst of its group on both metrics —
+  softer targets broaden the sampled distribution and commit less.
+- ~~**[DROPPED] Model-free "does ambient predict content codes" analysis.**~~ Started
+  2026-09-03 and discarded the same day. It measured frame-wise agreement between a val
+  clip's content codes and its nearest-ambient training neighbour's — i.e. whether ambience
+  predicts exact phoneme sequences, which is precisely the question already ruled out as the
+  wrong framing. A near-zero result was guaranteed by construction and would have been
+  misread as "the direction is dead".
+
+
 - **[IMPL] Multi-snapshot generation.** Ready, not submitted.
   `sbatch submission_scripts/run_tamia_s2a_gen_evolution.sbatch` — 10 lanes, predicted start
   19:33 EDT / 04:03 IST on `aip-csubakan`. Produces `listen/<sample_id>/` for A/B listening plus
