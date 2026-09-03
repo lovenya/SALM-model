@@ -196,3 +196,29 @@ or independent per-position sampling reintroduces incoherence from a different d
 
 Published precedent for the identical failure and identical fix: lip-to-speech, 65-78% WER
 with mel regression to 50.2/44.8% with discrete units (Choi et al., arXiv 2305.19603).
+
+## When an ablation gives the SAME answer under every hyperparameter, that invariance is the result
+
+A regularization sweep was run to fix severe overfitting (train loss ~9x below val loss). It
+failed its stated success criterion: the validation-loss minimum barely moved. But the
+conditioning-strength metric, measured at each run's own loss minimum, came back at +0.0220,
++0.0203, +0.0210, +0.0203, +0.0216, +0.0222, +0.0217 across seven configurations spanning
+three vocabulary sizes, 3x dropout, 10x weight decay, two model depths, and label smoothing.
+
+A spread of 0.0019 under interventions that large is not a weak result to be improved on. It
+is a **measurement of the data**, not of the model: that quantity is how much the conditioning
+input genuinely predicts the target, and no amount of model tuning moves it. Everything above
+it in the unregularized runs was memorisation, which the regularization correctly suppressed
+while leaving the floor untouched.
+
+**The lesson:** a sweep that "fails" by moving nothing may be delivering a more valuable
+number than one that succeeds. Before concluding a lever is wrong, check whether the metric
+was *invariant* rather than merely *unimproved* — invariance across genuinely different
+interventions is evidence about the problem, and it separates the irreducible signal from the
+part that was overfitting. Design sweeps so that this is readable: measure the metric at each
+run's own operating point (here, its own loss minimum), not at a fixed epoch, or the
+invariance is hidden by differences in where each run happens to be in its trajectory.
+
+**Corollary on where to look next.** Once an invariance like this is established, tuning the
+model is settled business — the remaining levers are the representation, the objective's
+structure, or the data. That redirection is worth more than the failed sweep cost.

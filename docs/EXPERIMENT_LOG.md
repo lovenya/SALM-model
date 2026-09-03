@@ -2141,3 +2141,176 @@ for choosing K, not as evidence of intelligibility.
 stuck, recovering only ~9.4 of 12 well-separated synthetic clusters. Replaced with k-means++
 seeding &mdash; 12.00/12. Also verified chunked nearest-code equals unchunked, a seed gives a
 bit-identical codebook, and every dequantized frame is literally a codebook entry.
+
+## 2026-09-02: raw-audio scene-planning probe -- job 436247
+
+**Question.** Can a pretrained audio-aware sequential planner infer a TTAS ambient scene and
+invent a scene-appropriate utterance before connection to the proven AudioLDM speech renderer?
+
+**Mechanism.** Qwen3-Omni-30B-A3B-Instruct receives the raw ambient waveform. Talker/code-to-wave
+are disabled before checkpoint loading; only Thinker text is generated. The paired transcript is
+recorded only as an evaluation reference and no retrieval is used. One 30-minute whole-node smoke
+produces eight texts: four distinct scenes under a direct utterance prompt and the same four under
+a `SCENE`/`UTTERANCE` scaffold. Counterfactual pairs use matched seeds: motorcycle vs crying baby,
+and flowing water vs applause.
+
+**Pre-registered interpretation.** Success means each utterance blind-cross-matches its actual
+audio over the paired counterfactual and scaffolded scene lines identify the event. Correct scenes
+plus generic utterances means retain the encoder and add TTAS-supervised utterance planning.
+Incorrect/interchangeable scene descriptions means reject this zero-shot Thinker as the scene core.
+
+**Submission.** Job 436247, `aip-csubakan`, one whole TamIA node (4x H100), 16 CPUs, 240G RAM,
+30-minute walltime with a 22-minute internal deadline. Submitted from a dirty checkout as permitted
+for smokes. Per user request, do not poll; the user will report completion.
+
+**Result: completed, 8/8, exit 0, 3:08 walltime.** Direct utterances were scene-specific for all
+four inputs: motorcycle -> "Whoa, that's loud!"; crying baby -> "Shhh, calm down now"; running
+water -> "That water's running strong today"; applause -> "That was amazing!" The matched-seed
+counterfactual pairs are cleanly distinguishable, establishing that the Thinker uses the ambient
+audio rather than emitting one generic prior.
+
+The scaffold was less accurate: baby and applause were correctly recognized, but motorcycle was
+labelled a chainsaw and running water was labelled frogs. This rejects the failure branch but is
+not perfect scene recognition. Direct planning is the stronger starting point.
+
+Resource audit: batch MaxRSS ~59.8 GiB; peak GPU memory was 16.0-17.9 GiB per H100. Terminal GPU
+utilization was sampled after exit, so average utilization is unavailable rather than truly zero.
+
+## 2026-09-02/03: discrete content codes -- the direction that WORKED, and where it stops
+
+Jobs 436244 (gate), 436344 (LM x3 K), 436345 + 438059 (generation), 438062 (regularization).
+Direction D7 in `docs/RESEARCH_DIRECTIONS.md`. This is the first content source in the project
+that produces speech from ambient audio alone without reading the target or copying a
+training row.
+
+### Step 1 -- the gate (436244). Does discretizing content destroy it?
+
+Fitted k-means codebooks at K = 256/512/1024/2048 over 1.49M real CTC-probe content frames,
+then fed **quantized oracle** content through the proven `content_concat_v4` renderer. Only
+quantization coarseness varied; everything else was byte-identical to the plain oracle lane.
+
+| K | held-out cosine | inter_asr_dist | by ear (user) |
+|---|---|---|---|
+| -- | -- | 0.3146 real speech / 0.3722 VAE ceiling | calibration |
+| oracle (unquantized) | -- | 0.4231 | -- |
+| 2048 | 0.9039 | 0.4843 | fine |
+| 1024 | 0.8953 | 0.5480 | fine |
+| 512 | 0.8852 | 0.6014 | fine |
+| 256 | 0.8738 | 0.6926 | **muffled, unintelligible** |
+
+**PASS.** Words survive at K>=512: K=1024 returned "Come on, old girl, wake up" (more accurate
+than unquantized oracle's "Come on, Olko, wake up") and K=2048 returned "This trick works
+every time. They always bring the food." verbatim. Note the listening verdict **disagreed with
+the metric ordering** -- the metric ranked 512 worst of the three viable K, the ear called all
+three fine, which made K=512 attractive (a quarter of 2048's vocabulary to learn). Recorded
+because it is the second time listening has overruled a metric ranking here.
+
+Reconstruction improves only ~+0.010 cosine per doubling of K -- a log-linear trend implying
+frame-wise VQ can never be tight in this space. Did not matter, because the gate is
+intelligibility, not reconstruction.
+
+### Step 2 -- ContentLM (436344). Autoregressive codes from ambient audio.
+
+27M-parameter transformer decoder, cross-attending to the 32-frame CLAP ambient sequence,
+predicting 256 discrete codes autoregressively; **samples** at inference rather than taking
+argmax. 100 epochs per K, batch 64, 274 steps/epoch, 0.37 min/epoch.
+
+| K | val_loss min | @ep | scene_gap there | max scene_gap | @ep | unigram baseline |
+|---|---|---|---|---|---|---|
+| 512 | 1.1428 | 7 | +0.0220 | +0.0874 | 90 | 5.4737 |
+| 1024 | 1.2930 | 7 | +0.0203 | +0.0807 | 86 | 6.1685 |
+| 2048 | 1.4397 | 7 | +0.0210 | +0.0590 | 87 | 6.7811 |
+
+Massively beats the unigram baseline (perplexity ~4 vs ~478), and `val_scene_gap` was positive
+and climbing -- the first non-flat scene-conditioning signal in the project. But badly overfit:
+train loss ~9x below val loss, val_loss +105-120% from its ep7 minimum.
+
+### Step 3 -- generation (436345, then 438059 with the full checkpoint spread)
+
+**Every LM lane crushed the zero-content control.** Best 0.4438 against `zero` at 0.9669.
+
+**Scene understanding demonstrably works.** The decisive evidence is cross-checkpoint
+consistency: the same clip yields the same topic, and sometimes the same proper noun, from
+independently-trained checkpoints.
+
+| sample | ep19 | ep39 | ep99 |
+|---|---|---|---|
+| NBpZiMOvb6Y | "**Gotta** check the **oil**..." | "**Gotta** hurry..." | "**gotta** catch up..." |
+| bOWkhocwjVs | "hear that **click**... **Engines** shake" | "tighten those **bolts**" | "Secure the **cargo**" |
+| 2ALeDpopSeE | "**Max**, something's moving" | "**Max**, I heard them" | "**Max**, come here buddy" |
+
+Fully coherent, scene-appropriate sentences appear: *"Gotta check the oil before it warms up."*
+*"Hey! Can you tighten those bolts before this starts too hard?"* *"This thing won't start."*
+From a 10.24 s ambient recording and nothing else.
+
+**Caveat that must travel with these numbers.** Several LM lanes score BETTER than their own
+oracle_quantized ceiling (0.4438 vs 0.4843). That is not superior accuracy -- `inter_asr_dist`
+measures whether two ASRs *agree*, so it rewards saying something *clearly*, not saying the
+*right* thing. LM-sampled codes come from the model's own distribution and render cleanly;
+quantized-oracle codes are a lossy approximation of one specific utterance and render slightly
+garbled. The metric cannot separate those.
+
+**More training does NOT help.** The full spread (438059) is flat-to-noisy along the epoch
+ladder: k2048 t0.7 gives ep7 0.4677 / ep19 0.5178 / ep39 0.4666 / ep59 0.5187 / ep79 0.4827 /
+ep99 0.4892. ep99 is no better than ep39, and ep19 produced some of the best transcripts.
+
+### Step 4 -- regularization sweep (438062). Four configs in parallel, one per GPU.
+
+Hypothesis: the overfit is why quality peaks mid-training and why late scene_gap is
+untrustworthy. Fix the overfit, and a healthy val_loss and a meaningful scene_gap should
+coincide at the same epoch.
+
+**FAILED on the pre-registered criterion, and produced a better finding than success would
+have.** val_loss min barely moved (k2048 1.4397 -> 1.4277; k512 1.1428 -> 1.1412), its epoch
+moved only ep7 -> ep10-14, and peak scene_gap *fell* (+0.0590 -> +0.0466; +0.0874 -> +0.0602).
+
+The result is in the invariance. **scene_gap at the val_loss minimum, across all seven
+configurations:**
+
+| config | dropout | wd | ls | layers | gap at min loss |
+|---|---|---|---|---|---|
+| k512 baseline | 0.1 | 0.01 | 0 | 6 | +0.0220 |
+| k1024 baseline | 0.1 | 0.01 | 0 | 6 | +0.0203 |
+| k2048 baseline | 0.1 | 0.01 | 0 | 6 | +0.0210 |
+| reg_a k2048 | 0.3 | 0.1 | 0 | 6 | +0.0203 |
+| reg_b k2048 | 0.3 | 0.1 | 0 | **4** | +0.0216 |
+| reg_c k512 | 0.3 | 0.1 | 0 | 6 | +0.0222 |
+| reg_d k2048 | 0.3 | 0.1 | **0.1** | 6 | +0.0217 |
+
+Range +0.0203 to +0.0222 -- **spread 0.0019** across three codebook sizes, 3x dropout, 10x
+weight decay, two depths and label smoothing. Mean **+0.0213 = a 2.2% perplexity effect**.
+
+**Interpretation: ~+0.021 is the real, generalizable scene->content signal** -- what ambient
+audio genuinely tells you about content through this representation. Everything above it was
+memorisation, and regularization confirmed that by suppressing the peak while leaving the floor
+untouched. Side findings: label smoothing HURT (reg_d worst on both metrics -- softer targets
+broaden the sampled distribution and commit less), and fewer layers changed nothing, so
+capacity is not the constraint either.
+
+### The verdict, and what it points at
+
+The user's listening localised the remaining problem precisely (2026-09-03): *"often a group of
+3-4 words will make sense, and then randomly another group would start"*, and separately that
+quality was good but *"none of the two was appropriate"* semantically. 3-4 words is ~25-40 of
+256 frames.
+
+Two candidate causes, and both alternatives are now empirically eliminated:
+
+- **more training** -- ruled out by 438059's flat epoch ladder
+- **regularization / capacity / soft targets** -- ruled out by 438062's invariant +0.021
+
+What remains is **granularity**: the LM plans over 256 frame-level tokens at 25 fps, one 40 ms
+acoustic state at a time, and holds a plan for ~30 frames. Short utterances come out clean;
+long ones fragment. That is a sequence-length problem, not a scene-understanding one.
+
+**Next: deduplication.** Collapse consecutive identical codes (256 -> ~40-80 tokens), making
+tokens phone-like rather than frame-like and shrinking the planning horizon 3-5x. Requires a
+duration predictor to re-expand to 256 frames for the concat channel. This is what every speech
+LM that produces coherent sentences does (GSLM, AudioLM, SpeechGPT all deduplicate HuBERT
+units). The user's own diagnosis -- "the codebook alignment isn't right" -- was correct;
+the accompanying "maybe it will take more time" was not, and 438059 is what showed it.
+
+Listening bundles with per-lane READMEs (generated by
+`scripts/a2s/write_listening_readmes.py`, every figure read from the scoring JSONs so they
+cannot drift from the audio) are in
+`generations/{content_lm_gen_20260903_0328,content_lm_gen_20260903_0004,codebook_gate_20260902_0656,control_lanes_20260831_0735}`.
