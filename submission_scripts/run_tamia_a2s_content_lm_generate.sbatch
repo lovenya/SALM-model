@@ -61,7 +61,7 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=480G
 #SBATCH --gpus-per-node=h100:4
-#SBATCH --time=00:25:00
+#SBATCH --time=00:40:00
 #SBATCH --output=/scratch/l/lovenya/salm_model_outputs/logs/slurm/%x-%j.out
 
 set -euo pipefail
@@ -75,7 +75,13 @@ source /scratch/l/lovenya/SALM-model/submission_scripts/_salm_env.sh
 #      min-val_loss are different epochs with different failure characters, and no metric
 #      settles which produces better speech. The ear does.
 KS="${KS:-512 1024 2048}"
-CKPT_TAGS="${CKPT_TAGS:-checkpoint_best_loss checkpoint_ep39 checkpoint_best}"
+# THE FULL SAVED SPREAD, not a sample of it. The first sweep (job 436345) used only
+# best_loss / ep39 / best and therefore never generated from the LAST epoch at all -- which
+# is the one question "is more training helping?" actually needs. That also violated the
+# standing repo rule in CLAUDE.md. Ordered oldest -> newest so the listening trajectory reads
+# left to right: ep7 (min val_loss) then every 20 epochs to ep99 (= last), plus `best`
+# (max scene_gap, ep86-90) which sits near the end but is selected differently.
+CKPT_TAGS="${CKPT_TAGS:-checkpoint_best_loss checkpoint_ep19 checkpoint_ep39 checkpoint_ep59 checkpoint_ep79 checkpoint_ep99 checkpoint_best}"
 # checkpoint_best is selected on val_scene_gap, NOT val_loss -- a checkpoint with the better
 # loss and no scene_gap is precisely the failure this pipeline is built to detect.
 CTC_CKPT="${CTC_CKPT:-$OUTPUTS_ROOT/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt}"
