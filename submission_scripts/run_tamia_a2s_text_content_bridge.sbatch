@@ -38,8 +38,9 @@
 set -euo pipefail
 
 # shellcheck disable=SC1091
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export SALM_REPO="$REPO"
+: "${SALM_REPO:?ERROR: submit with --export=ALL,SALM_REPO=/absolute/clean/checkout}"
+REPO="$SALM_REPO"
+[[ -d "$REPO" ]] || { echo "ERROR: SALM_REPO is not a directory: $REPO" >&2; exit 1; }
 source "$REPO/submission_scripts/_salm_env.sh"
 
 STAMP="$(TZ=America/Toronto date +%Y%m%d_%H%M)"
