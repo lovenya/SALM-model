@@ -56,9 +56,12 @@
 #SBATCH --job-name=salm-a2s-rescore
 #SBATCH --account=aip-csubakan
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=120G
-#SBATCH --gpus-per-node=h100:1
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=480G
+# h100 is allocated BY WHOLE NODE on TamIA -- a :1 request is rejected outright with
+# "The h100 GPUs are only allocated by node." So this asks for 4 even though scoring uses one.
+# Do not "optimise" this back down; it will not schedule.
+#SBATCH --gpus-per-node=h100:4
 #SBATCH --time=00:30:00
 #SBATCH --output=/scratch/l/lovenya/salm_model_outputs/logs/slurm/%x-%j.out
 
