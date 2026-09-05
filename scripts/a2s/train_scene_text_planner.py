@@ -221,6 +221,18 @@ def generated_speech_view(text: str, target_mode: str) -> str:
     return text[marker + len("speech:") :].strip() if marker >= 0 else text.strip()
 
 
+def generation_task(target_mode: str) -> str:
+    """Return the task token used for held-out generation."""
+    return "speech" if target_mode == "multitask" else target_mode
+
+
+def generation_reference(row, target_mode: str) -> str:
+    """Return the field a generated lane is actually intended to predict."""
+    if target_mode in {"structured", "multitask"}:
+        return row.speech_text
+    return format_target(row, target_mode)
+
+
 @torch.no_grad()
 def generate_report(model, tokenizer, val_rows, train_rows, ambient, source, target_mode, count, max_new, device):
     model.eval()
@@ -233,7 +245,7 @@ def generate_report(model, tokenizer, val_rows, train_rows, ambient, source, tar
             a = torch.from_numpy(
                 np.asarray(ambient[start : start + len(chosen)], dtype=np.float32)
             ).to(device)
-            task = "structured" if target_mode == "structured" else "speech"
+            task = generation_task(target_mode)
             tids = torch.full(
                 (len(chosen),), TASK_TO_ID[task], device=device, dtype=torch.long
             )
@@ -255,21 +267,26 @@ def generate_report(model, tokenizer, val_rows, train_rows, ambient, source, tar
     generated = [generated_speech_view(x, target_mode) for x in generated]
     shuffled = [generated_speech_view(x, target_mode) for x in shuffled]
 
+    references = [generation_reference(row, target_mode) for row in rows]
     records = []
-    for row, pred, wrong in zip(rows, generated, shuffled):
+    for row, pred, wrong, reference in zip(rows, generated, shuffled, references):
         records.append(
             {
                 "sample_id": row.sample_id,
                 "audio_cap": row.audio_cap,
                 "reference_reasoning": row.reasoning,
                 "reference_speech": row.speech_text,
+                "reference_target": reference,
+                "generated_text": pred,
                 "generated_speech": pred,
                 "generated_with_shuffled_scene": wrong,
-                "target_token_f1": token_f1(pred, row.speech_text),
+                "target_token_f1": token_f1(pred, reference),
                 "changed_when_shuffled": normalize_text(pred) != normalize_text(wrong),
             }
         )
-    metrics = novelty_metrics(generated, (r.speech_text for r in train_rows))
+    metrics = novelty_metrics(
+        generated, (generation_reference(r, target_mode) for r in train_rows)
+    )
     metrics.update(
         {
             "mean_target_token_f1": float(np.mean([r["target_token_f1"] for r in records])),
@@ -310,7 +327,11 @@ def main() -> int:
         "--target-mode", choices=("speech", "caption", "reasoning", "structured", "multitask"),
         default="speech",
     )
-    ap.add_argument("--train-scope", choices=("adapter", "decoder", "full"), default="decoder")
+    ap.add_argument(
+        "--train-scope",
+        choices=("adapter", "cross_attention", "decoder", "full"),
+        default="decoder",
+    )
     ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--grad-accum", type=int, default=4)

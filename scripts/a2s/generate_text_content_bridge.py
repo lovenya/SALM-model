@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""Render held-out oracle-text bridge lanes through ``content_concat_v4``.
+"""Render transcript controls or raw-audio planner predictions through the speech renderer.
 
-All lanes use the renderer's learned-null global condition.  They differ only in the
-content sequence: codes sampled from the supplied transcript, codes sampled from another
-row's transcript, or target-speech oracle codes.  Ambient audio is never loaded.
+The planner lanes consume cached predictions that were generated from ambient audio.  The
+renderer itself never sees oracle captions or target transcripts as conditioning.
 """
 
 from __future__ import annotations
@@ -51,7 +50,12 @@ def main() -> int:
     ap.add_argument("--bridge-checkpoint", type=Path, required=True)
     ap.add_argument("--renderer-checkpoint", type=Path, required=True)
     ap.add_argument("--features", type=Path, required=True)
-    ap.add_argument("--lane", choices=["oracle_text", "shuffled_text", "oracle_codes"], required=True)
+    ap.add_argument("--planner-manifest", type=Path, default=None)
+    ap.add_argument(
+        "--lane",
+        choices=["oracle_text", "shuffled_text", "oracle_codes", "planner_text", "planner_shuffled"],
+        required=True,
+    )
     ap.add_argument("--split", choices=["val", "test"], default="val")
     ap.add_argument("--start-index", type=int, default=0)
     ap.add_argument("--num-samples", type=int, default=16)
@@ -81,6 +85,20 @@ def main() -> int:
     if len(rows) < 2:
         raise SystemExit("need at least two rows for a paired shuffled-text control")
 
+    planner_by_id = {}
+    if args.lane in {"planner_text", "planner_shuffled"}:
+        if args.planner_manifest is None or not args.planner_manifest.is_file():
+            raise SystemExit("planner lanes require --planner-manifest")
+        planner_rows = [
+            json.loads(line) for line in args.planner_manifest.read_text().splitlines() if line.strip()
+        ]
+        planner_by_id = {str(row["sample_id"]): row for row in planner_rows}
+        if len(planner_by_id) != len(planner_rows):
+            raise SystemExit("planner manifest contains duplicate sample IDs")
+        missing = [row.sample_id for row in rows if row.sample_id not in planner_by_id]
+        if missing:
+            raise SystemExit(f"planner manifest is missing held-out IDs: {missing[:5]}")
+
     hidden = np.load(args.features / f"{args.split}_hidden.npy", mmap_mode="r")
     mask = np.load(args.features / f"{args.split}_mask.npy", mmap_mode="r")
     target_codes = np.load(
@@ -96,6 +114,18 @@ def main() -> int:
     if int(bridge_payload["num_codes"]) != 512:
         raise SystemExit("this gate requires its registered K=512 checkpoint")
     bridge = build_model(bridge_payload, args.device)
+    text_tokenizer = text_encoder = None
+    if args.lane in {"planner_text", "planner_shuffled"}:
+        from transformers import AutoTokenizer, T5EncoderModel
+
+        text_model = str(bridge_payload["text_model"])
+        text_tokenizer = AutoTokenizer.from_pretrained(text_model, local_files_only=True)
+        text_dtype = torch.float16 if args.device.startswith("cuda") else torch.float32
+        text_encoder = T5EncoderModel.from_pretrained(
+            text_model, local_files_only=True, torch_dtype=text_dtype
+        ).to(args.device).eval()
+        for parameter in text_encoder.parameters():
+            parameter.requires_grad_(False)
     book = ContentCodebook(512, int(bridge_payload["codes"].shape[1])).to(args.device)
     book.codes.copy_(bridge_payload["codes"].to(args.device))
 
@@ -138,11 +168,30 @@ def main() -> int:
         batch_rows = rows[start : start + args.batch_size]
         target_idx = indices[start : start + len(batch_rows)]
         source_idx = source_indices[start : start + len(batch_rows)]
-        if args.lane == "oracle_codes":
+        if args.lane in {"planner_text", "planner_shuffled"}:
+            field = "generated_speech" if args.lane == "planner_text" else "generated_with_shuffled_scene"
+            supplied_texts = [str(planner_by_id[row.sample_id].get(field, "")).strip() for row in batch_rows]
+            if any(not text for text in supplied_texts):
+                raise SystemExit(f"planner manifest has an empty {field!r} value")
+            encoded = text_tokenizer(
+                supplied_texts, padding="max_length", truncation=True,
+                max_length=int(bridge_payload["max_text_tokens"]), return_tensors="pt",
+            )
+            input_ids = encoded.input_ids.to(args.device)
+            m = encoded.attention_mask.to(args.device).bool()
+            with torch.inference_mode():
+                h = text_encoder(input_ids=input_ids, attention_mask=m).last_hidden_state.float()
+            code_t = bridge.sample(
+                h, m, temperature=args.temperature, top_k=args.top_k,
+                greedy=args.greedy, generator=code_rng,
+            )
+        elif args.lane == "oracle_codes":
+            supplied_texts = [row.speech_text for row in batch_rows]
             code_t = torch.from_numpy(
                 np.asarray(target_codes[target_idx], dtype=np.int64)
             ).to(args.device)
         else:
+            supplied_texts = [rows_all[i].speech_text for i in source_idx]
             h = torch.from_numpy(np.asarray(hidden[source_idx], dtype=np.float32)).to(args.device)
             m = torch.from_numpy(np.asarray(mask[source_idx], dtype=np.bool_)).to(args.device)
             code_t = bridge.sample(
@@ -176,8 +225,9 @@ def main() -> int:
         finally:
             pipe.unet.forward = original_forward
 
-        for row, audio, ti, si, sampled in zip(
-            batch_rows, audios, target_idx, source_idx, code_t.detach().cpu().numpy()
+        for row, audio, ti, si, supplied, sampled in zip(
+            batch_rows, audios, target_idx, source_idx, supplied_texts,
+            code_t.detach().cpu().numpy(),
         ):
             path = args.out_dir / "audio" / f"{row.sample_id}.wav"
             ref = args.out_dir / "audio" / f"{row.sample_id}__reference.wav"
@@ -189,7 +239,6 @@ def main() -> int:
                 ),
                 AUDIOLDM_SR,
             )
-            supplied = rows_all[si].speech_text
             manifest.append({
                 "sample_id": row.sample_id,
                 "status": "success",
@@ -201,7 +250,18 @@ def main() -> int:
                 "speech_text": supplied,
                 "supplied_text": supplied,
                 "paired_target_text": row.speech_text,
-                "text_source_sample_id": rows_all[si].sample_id,
+                "text_source_sample_id": (
+                    row.sample_id if args.lane == "planner_text" else
+                    None if args.lane == "planner_shuffled" else
+                    rows_all[si].sample_id
+                ),
+                "conditioning_source": (
+                    "raw_audio_planner" if args.lane == "planner_text" else
+                    "shuffled_raw_audio_planner" if args.lane == "planner_shuffled" else
+                    args.lane
+                ),
+                "oracle_conditioning": args.lane in {"oracle_text", "shuffled_text", "oracle_codes"},
+                "planner_was_audio_conditioned": args.lane.startswith("planner_"),
                 "target_row_index": ti,
                 "text_source_row_index": si,
                 "num_distinct_codes": int(np.unique(sampled).size),
@@ -225,6 +285,8 @@ def main() -> int:
         "greedy": args.greedy,
         "seed": args.seed,
         "ambient_read": False,
+        "planner_was_audio_conditioned": args.lane.startswith("planner_"),
+        "planner_manifest": str(args.planner_manifest) if args.planner_manifest else None,
         "elapsed_seconds": time.time() - started,
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

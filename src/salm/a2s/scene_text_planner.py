@@ -184,12 +184,20 @@ class AudioConditionedT5(nn.Module):
 
     def set_train_scope(self, scope: str, source: str) -> None:
         """Choose an explicit fine-tuning surface; the audio adapter always trains."""
-        if scope not in {"adapter", "decoder", "full"}:
+        if scope not in {"adapter", "cross_attention", "decoder", "full"}:
             raise ValueError(f"unknown train scope: {scope}")
         for p in self.t5.parameters():
             p.requires_grad_(False)
         for p in self.audio_adapter.parameters():
             p.requires_grad_(source == "audio")
+        if scope == "cross_attention":
+            # T5 decoder blocks are [self-attention, cross-attention, feed-forward].
+            # Updating the complete cross-attention layer (including its layer norm)
+            # lets the decoder learn to read audio memory without rewriting its
+            # pretrained language model or output head.
+            for block in self.t5.decoder.block:
+                for p in block.layer[1].parameters():
+                    p.requires_grad_(True)
         if scope in {"decoder", "full"}:
             for p in self.t5.decoder.parameters():
                 p.requires_grad_(True)

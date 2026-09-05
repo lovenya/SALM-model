@@ -16,6 +16,7 @@ from salm.a2s.scene_text_planner import (
     novelty_metrics,
     token_f1,
 )
+from scripts.a2s.train_scene_text_planner import generation_reference, generation_task
 
 
 ROW = PlannerRow(
@@ -90,3 +91,37 @@ def test_external_encoder_outputs_work_with_installed_t5_api():
     assert out.logits.shape == (2, 3, 32)
     generated = wrapper.generate_audio(audio, tasks, max_new_tokens=2)
     assert generated.shape[0] == 2
+
+
+def test_cross_attention_scope_preserves_language_model_parameters():
+    transformers = pytest.importorskip("transformers")
+    config = transformers.T5Config(
+        vocab_size=32,
+        d_model=16,
+        d_ff=32,
+        num_layers=1,
+        num_decoder_layers=1,
+        num_heads=4,
+        decoder_start_token_id=0,
+        eos_token_id=1,
+        pad_token_id=0,
+    )
+    wrapper = AudioConditionedT5(
+        transformers.T5ForConditionalGeneration(config),
+        ambient_dim=12,
+        adapter_layers=1,
+        adapter_heads=4,
+        dropout=0,
+    )
+    wrapper.set_train_scope("cross_attention", "audio")
+    assert all(p.requires_grad for p in wrapper.audio_adapter.parameters())
+    assert all(p.requires_grad for p in wrapper.t5.decoder.block[0].layer[1].parameters())
+    assert not any(p.requires_grad for p in wrapper.t5.decoder.block[0].layer[0].parameters())
+    assert not any(p.requires_grad for p in wrapper.t5.decoder.block[0].layer[2].parameters())
+    assert not wrapper.t5.shared.weight.requires_grad
+    assert not wrapper.t5.lm_head.weight.requires_grad
+
+
+def test_caption_generation_uses_caption_task_and_reference():
+    assert generation_task("caption") == "caption"
+    assert generation_reference(ROW, "caption") == ROW.audio_cap
