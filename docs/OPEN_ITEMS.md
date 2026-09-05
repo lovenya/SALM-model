@@ -736,3 +736,33 @@ L0, L0f, O2 and T0 identically, since they share the encoder. Not built yet.
 Consequence either way: a batch-size change creates an old cohort (the completed 91-epoch L2 at
 effective 64) and a new cohort that cannot be compared directly. Worth doing deliberately, once,
 rather than drifting.
+
+---
+
+### Guessed API signatures have now cost three jobs
+
+*2026-09-05, job 442808*
+
+`score_memorisation.py` called `WhisperASR(device=...)`. The real signature is
+`WhisperASR(model_path, device)` — one `sed -n '/class WhisperASR/,/def transcribe/p'` away, and
+`score_intelligibility.py:150` in this same repo already constructs it correctly. All 36 lanes
+and 576 wavs generated fine in ~3 minutes; the job then died in scoring and Slurm recorded
+`State=FAILED` over entirely good output.
+
+This is the third instance of the failure mode CLAUDE.md already has a standing rule for
+("verify APIs against installed source before writing code that depends on them"). The rule
+was not enough on its own, so two structural changes:
+
+1. **Scoring can no longer fail a job whose generations succeeded.** Both scoring passes in
+   `run_tamia_a2s_split_seed_probe.sbatch` now end in `|| echo ... >&2`. Generation is the
+   expensive part; scoring is cheap and rerunnable, and it should never be able to mark
+   576 good wavs as a failed job.
+2. **New scripts get a stub-driven end-to-end run before they reach a GPU.** The scorer was
+   validated on the real 442808 manifests with a perfect-ASR stub (span gap +12.12, correctly
+   signed) and an empty-ASR stub (both gaps exactly 0.00, control not leaking) — CPU only, no
+   model, seconds. That would have caught this, because constructing the real ASR is the one
+   line a stub replaces. Write the stub run *before* submitting, not after the traceback.
+
+**Also fixed:** the probe's summary re-derived its output stamp with a fresh `date` call, which
+printed a directory one minute off from the one actually created. Paths in a summary must be
+the variable that was used, never recomputed.

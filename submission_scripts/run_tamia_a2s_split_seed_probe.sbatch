@@ -179,7 +179,8 @@ for d in "$OUT_ROOT"/*/; do [[ -f "$d/manifest.jsonl" ]] && DIRS="$DIRS ${d%/}";
 CUDA_VISIBLE_DEVICES=0 python scripts/a2s/score_memorisation.py \
     --dirs $DIRS --device cuda \
     --out "$OUTPUTS_ROOT/memorisation_${STAMP}.json" \
-    2>&1 | tee "$OUTPUTS_ROOT/logs/slurm/split_seed_mem_${STAMP}.log"
+    2>&1 | tee "$OUTPUTS_ROOT/logs/slurm/split_seed_mem_${STAMP}.log" \
+    || echo "SCORING FAILED (memorisation) -- generations are intact, rescore separately" >&2
 
 echo
 echo "==================== SCORING: intelligibility (scale only) ===================="
@@ -187,11 +188,12 @@ echo "==================== SCORING: intelligibility (scale only) ===============
 CUDA_VISIBLE_DEVICES=0 python scripts/a2s/score_intelligibility.py \
     --dirs $DIRS --ctc-checkpoint "$CTC_CKPT" --device cuda \
     --out "$OUTPUTS_ROOT/intelligibility_split_seed_${STAMP}.json" \
-    2>&1 | tee "$OUTPUTS_ROOT/logs/slurm/split_seed_intel_${STAMP}.log"
+    2>&1 | tee "$OUTPUTS_ROOT/logs/slurm/split_seed_intel_${STAMP}.log" \
+    || echo "SCORING FAILED (intelligibility) -- generations are intact" >&2
 
 echo
 echo "=========================================================="
-echo "listen: $OUT_ROOT/*/audio/"
+echo "listen: $OUT_ROOT/*/audio/"   # the REAL path; do not re-derive the stamp
 echo "  split__* : same seed, different split  -> is train better than val?"
 echo "  seed__*  : same 4 clips, 6 seeds       -> does the scene pin the topic?"
 echo

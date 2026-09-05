@@ -59,6 +59,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from configs import paths as project_paths  # noqa: E402
 from salm.a2s.asr import WhisperASR  # noqa: E402
 from salm.a2s.wer import normalize_text, word_edit_distance  # noqa: E402
 
@@ -156,8 +157,8 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    log("loading Whisper ...")
-    whisper = WhisperASR(device=args.device)
+    log(f"loading Whisper from {project_paths.WHISPER_LARGE_V3_PATH} ...")
+    whisper = WhisperASR(project_paths.WHISPER_LARGE_V3_PATH, args.device)
 
     scored: dict[str, dict] = {}
     for d in args.dirs:
