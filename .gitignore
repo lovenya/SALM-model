@@ -10,3 +10,13 @@ wandb/
 *.ckpt
 *.pt
 .DS_Store
+
+# Per-job working checkouts. Machinery, not source -- the commit each job actually ran is
+# already recorded in its own log header.
+.job_checkouts/
+
+# Patch-conflict debris from applying patches between the two workstreams on this repo.
+# NOTE: a .rej file means a hunk FAILED to apply, so intended work may silently not have
+# landed. Read one before trusting that ignoring it is safe.
+*.orig
+*.rej
