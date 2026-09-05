@@ -7,16 +7,23 @@
 # /scratch hit 100%, 0 bytes free. Two lanes had completed. The models are fine; only the
 # plumbing broke.
 #
-# DELIBERATELY TRIMMED, 13 lanes not 43. The original sweep was greedy, and the late
-# checkpoints were never the ones worth hearing: val_loss bottoms at epoch 9 and nearly
-# DOUBLES by epoch 64 (2.37 -> 4.58 for K=512), so ep39 and `best` (~ep90) are substantially
-# memorisation. The frame-level run already established that the overfit end sounds no better
-# than mid-training. So this covers the loss minimum and just past it, and nothing else.
+# THE FULL SURVIVING SPREAD, 25 lanes. An earlier version of this script trimmed to
+# best_loss+ep19 under disk pressure, which was the wrong call twice over: the user has
+# repeatedly asked for last-epoch generations, and CLAUDE.md already requires
+# checkpoint-comparison jobs to cover the full saved spread.
 #
-#   best_loss (~ep9) x 3 K x 2 temps  = 6   the honest checkpoint, at each run's own optimum
-#   ep19             x 3 K x 2 temps  = 6   just past it, not yet badly overfit
-#   zero control                      = 1   without it "sounds like speech" is unfalsifiable
-#                                      13   ~204 MB of wavs
+#   best_loss (ep9-10) x 3 K x 2 temps  = 6   each run's own loss minimum, least overfit
+#   ep19               x 3 K x 2 temps  = 6
+#   ep39               x 3 K x 2 temps  = 6
+#   best (ep78-91)     x 3 K x 2 temps  = 6   latest surviving point, deep in overfit
+#   zero control                        = 1   without it "sounds like speech" is unfalsifiable
+#                                        25   ~390 MB of wavs
+#
+# NOT RECOVERABLE: the literal final epoch. checkpoint_ep99 and checkpoint_last were deleted
+# from all four dedup runs during the 2026-09-05 disk cleanup, so `best` (ep78-91) is now the
+# latest available point. Same overfit regime, but not epoch 99. Retraining is the only way
+# back to it -- 43 min, and worth it only if the ep39-vs-best comparison suggests the very
+# end differs.
 #
 # WHAT THE TRAINING ALREADY ESTABLISHED (439442), measured at each run's own loss minimum:
 #
@@ -106,7 +113,7 @@ if [[ "$FREE" -lt "$MIN_FREE_MB" ]]; then
     exit 1
 fi
 
-salm_print_header "DEDUP GENERATION: 13 lanes from job 439442's checkpoints (no retraining)"
+salm_print_header "DEDUP GENERATION: full spread from job 439442's checkpoints (no retraining)"
 echo "compare against: $OUTPUTS_ROOT/generations/content_lm_gen_20260903_0328 (frame-level)"
 
 DONE=0
