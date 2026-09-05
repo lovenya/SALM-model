@@ -88,6 +88,7 @@ run_lane() {
     --epochs "$EPOCHS" \
     --batch-size "$BATCH_SIZE" \
     --grad-accum "$GRAD_ACCUM" \
+    --save-every 0 \
     --max-minutes "$MAX_MINUTES" \
     --generate-count 64 \
     2>&1 | tee "$RUN_ROOT/${name}.log"

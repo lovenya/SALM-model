@@ -49,7 +49,12 @@ FEATURE_DIR="${FEATURE_DIR:-$OUTPUTS_ROOT/text_content_features}"
 CODEBOOK="${CODEBOOK:-$OUTPUTS_ROOT/content_codebook/codebook_k512.pt}"
 RENDERER="${RENDERER:-$RUNS_ROOT/a2s_audioldm_clapseq_xformer/content_concat_v4/checkpoints/checkpoint_best.pt}"
 TEXT_MODEL="${TEXT_MODEL:-/scratch/l/lovenya/salm_migration_clean/models/hf_cache/models--google--flan-t5-large/snapshots/0613663d0d48ea86ba8cb3d7a44f0f65dc596a2a}"
-TRAIN_DIR="$OUTPUTS_ROOT/text_content_lm/$RUN_NAME"
+SALVAGE_TRAIN_DIR="${SALVAGE_TRAIN_DIR:-}"
+if [[ -n "$SALVAGE_TRAIN_DIR" ]]; then
+    TRAIN_DIR="$SALVAGE_TRAIN_DIR"
+else
+    TRAIN_DIR="$OUTPUTS_ROOT/text_content_lm/$RUN_NAME"
+fi
 GEN_ROOT="$OUTPUTS_ROOT/generations/${RUN_NAME}"
 NUM_GEN="${NUM_GEN:-16}"
 
@@ -62,13 +67,18 @@ for P in "$CODEBOOK" "$RENDERER" "$TEXT_MODEL" \
          "$OUTPUTS_ROOT/content_codes/codes_codebook_k512_val.npy"; do
     [[ -e "$P" ]] || { echo "MISSING: $P" >&2; exit 1; }
 done
-[[ ! -e "$TRAIN_DIR" ]] || { echo "REFUSING existing run: $TRAIN_DIR" >&2; exit 1; }
+if [[ -n "$SALVAGE_TRAIN_DIR" ]]; then
+    [[ -d "$TRAIN_DIR" ]] || { echo "MISSING salvage run: $TRAIN_DIR" >&2; exit 1; }
+else
+    [[ ! -e "$TRAIN_DIR" ]] || { echo "REFUSING existing run: $TRAIN_DIR" >&2; exit 1; }
+fi
 [[ ! -e "$GEN_ROOT" ]] || { echo "REFUSING existing generation: $GEN_ROOT" >&2; exit 1; }
 
 salm_print_header "Oracle text -> K=512 content codes -> frozen AudioLDM renderer"
 salm_start_monitor "$OUTPUTS_ROOT/logs/resources/$RUN_NAME" "$RUN_NAME" 30
 mkdir -p "$GEN_ROOT"
 
+if [[ -z "$SALVAGE_TRAIN_DIR" ]]; then
 # Cache token-level frozen Flan-T5 states once. These scripts expose no ambient argument and
 # read only speech_text from the A2S index.
 for SPLIT in train val; do
@@ -86,10 +96,18 @@ timeout --signal=TERM --kill-after=120s 50m torchrun --standalone --nproc_per_no
 
 TAGS=(checkpoint_best_loss checkpoint_ep19 checkpoint_ep39 checkpoint_ep59 \
       checkpoint_ep79 checkpoint_ep99 checkpoint_best_binding)
-LANES=(oracle_text shuffled_text oracle_codes)
 [[ -f "$TRAIN_DIR/checkpoints/checkpoint_ep99.pt" ]] || {
     echo "ERROR: training did not complete the registered 100 epochs" >&2; exit 1;
 }
+else
+TAGS=(checkpoint_ep19 checkpoint_ep39)
+for TAG in "${TAGS[@]}"; do
+    [[ -f "$TRAIN_DIR/checkpoints/${TAG}.pt" ]] || {
+        echo "MISSING salvage checkpoint: $TRAIN_DIR/checkpoints/${TAG}.pt" >&2; exit 1;
+    }
+done
+fi
+LANES=(oracle_text shuffled_text oracle_codes)
 
 # Pack independent (checkpoint,lane) renderer calls four at a time on explicit devices.
 pids=()

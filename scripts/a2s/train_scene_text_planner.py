@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import sys
 import time
@@ -281,8 +282,23 @@ def generate_report(model, tokenizer, val_rows, train_rows, ambient, source, tar
 
 
 def trainable_state(model):
+    """Return a compact inference checkpoint for trainable parameters only."""
     names = {name for name, p in model.named_parameters() if p.requires_grad}
-    return {name: tensor.detach().cpu() for name, tensor in model.state_dict().items() if name in names}
+    return {
+        name: tensor.detach().to(device="cpu", dtype=torch.bfloat16)
+        for name, tensor in model.state_dict().items()
+        if name in names
+    }
+
+
+def atomic_torch_save(payload: dict, path: Path) -> None:
+    """Never expose a partially written checkpoint as a valid artifact."""
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        torch.save(payload, temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -308,7 +324,7 @@ def main() -> int:
     ap.add_argument("--eval-batch-size", type=int, default=16)
     ap.add_argument("--generate-count", type=int, default=64)
     ap.add_argument("--max-new-tokens", type=int, default=96)
-    ap.add_argument("--save-every", type=int, default=2)
+    ap.add_argument("--save-every", type=int, default=0)
     ap.add_argument("--max-minutes", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -406,7 +422,7 @@ def main() -> int:
                 args.source, amb["train"], args.device,
             )
             (loss / args.grad_accum).backward()
-            running += float(loss)
+            running += float(loss.detach())
             if (bi + 1) % args.grad_accum == 0 or bi + 1 == batches:
                 torch.nn.utils.clip_grad_norm_((p for p in model.parameters() if p.requires_grad), 1.0)
                 opt.step()
@@ -428,14 +444,24 @@ def main() -> int:
         )
         history.append(metrics)
         (run_dir / "history.json").write_text(json.dumps(history, indent=2))
-        payload = {"trainable_state": trainable_state(model), "args": vars(args), "metrics": metrics}
-        torch.save(payload, ckpt_dir / "checkpoint_last.pt")
         if metrics["val_loss"] < best_loss:
             best_loss = metrics["val_loss"]
-            best_state = payload["trainable_state"]
-            torch.save(payload, ckpt_dir / "checkpoint_best_loss.pt")
+            best_state = trainable_state(model)
+            best_payload = {
+                "trainable_state": best_state,
+                "args": vars(args),
+                "metrics": metrics,
+                "checkpoint_dtype": "bfloat16",
+            }
+            atomic_torch_save(best_payload, ckpt_dir / "checkpoint_best_loss.pt")
         if args.save_every and (epoch + 1) % args.save_every == 0:
-            torch.save(payload, ckpt_dir / f"checkpoint_ep{epoch}.pt")
+            periodic_payload = {
+                "trainable_state": trainable_state(model),
+                "args": vars(args),
+                "metrics": metrics,
+                "checkpoint_dtype": "bfloat16",
+            }
+            atomic_torch_save(periodic_payload, ckpt_dir / f"checkpoint_ep{epoch}.pt")
         log(
             f"epoch {epoch:02d} train={metrics['train_loss']:.4f} "
             f"val={metrics['val_loss']:.4f} GAP={metrics['val_scene_gap']:+.4f} "
@@ -446,6 +472,14 @@ def main() -> int:
         if args.max_minutes and metrics["minutes"] >= args.max_minutes:
             log(f"stopping cleanly at --max-minutes={args.max_minutes:g}")
             break
+
+    final_payload = {
+        "trainable_state": trainable_state(model),
+        "args": vars(args),
+        "metrics": history[-1],
+        "checkpoint_dtype": "bfloat16",
+    }
+    atomic_torch_save(final_payload, ckpt_dir / "checkpoint_last.pt")
 
     if best_state is not None:
         missing, unexpected = model.load_state_dict(best_state, strict=False)
