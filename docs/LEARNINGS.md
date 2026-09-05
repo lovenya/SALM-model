@@ -222,3 +222,45 @@ invariance is hidden by differences in where each run happens to be in its traje
 **Corollary on where to look next.** Once an invariance like this is established, tuning the
 model is settled business — the remaining levers are the representation, the objective's
 structure, or the data. That redirection is worth more than the failed sweep cost.
+
+---
+
+## A conditioning metric that grows with overfitting is measuring retrieval, not conditioning
+
+*2026-09-05, from the dedup and frame-level history curves (jobs 439442, 436344)*
+
+`val_scene_gap` — `loss(rolled ambient) − loss(true ambient)` — was the headline number for
+the run-length experiment: +0.041 for dedup_k512 against +0.021 for frame-level, with ~0.001
+seed variance. Reading the full epoch curves rather than the value at the loss minimum shows
+it **rises monotonically as the model overfits**, in every run measured:
+
+| run | val min | scene_gap @ val min | scene_gap @ ep99 | val loss @ ep99 |
+|---|---|---|---|---|
+| dedup_k512 | ep9 | +0.0414 | **+0.1329** | 3.07 (from 1.50) |
+| dedup_k1024 | ep10 | +0.0370 | +0.1060 | 3.21 (from 1.62) |
+| dedup_k2048 | ep9 | +0.0322 | +0.0946 | 3.41 (from 1.76) |
+| frame k512 | ep7 | +0.0220 | +0.0873 | 2.52 (from 1.14) |
+| frame k2048 | ep7 | +0.0210 | +0.0586 | 2.95 (from 1.44) |
+
+So an overfit frame-level model posts a *higher* scene_gap (+0.087) than the run-length model
+at its optimum (+0.041), while being decisively worse by val loss. Taken at face value the
+metric would have ranked them backwards.
+
+**Why it happens, and why it is not a bug.** The ablation is computed on val, where nothing is
+memorised — but memorisation still sharpens the *mapping* from ambient to content, because the
+ambient becomes a better retrieval key into memorised training utterances. Rolling it destroys
+the key, so the penalty grows. The metric is honestly reporting "how much the model leans on
+the ambient"; it was our reading of that as "how well the scene is understood" that was wrong.
+Leaning harder on the ambient as a lookup index is not scene understanding.
+
+**What survives.** The dedup-vs-frame-level comparison stands, because both arms were read at
+their own val minimum — which the earlier regularization lesson on this page had already made
+standard practice. That convention is the only reason this confound did not invalidate the
+result outright.
+
+**The rule:** an ablation-gap metric is only comparable at matched val loss, and the epoch must
+be quoted with the number. More generally, before trusting any metric as a measure of quality,
+plot it against the overfitting axis. If it improves monotonically while val loss doubles, it
+is measuring something the model gains by memorising, and the direction it points is only
+trustworthy at a fixed point on that axis. This is cheap to check — the numbers were already
+sitting in `history.json` — and it should be checked once per metric, not once per project.
