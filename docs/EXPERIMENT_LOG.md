@@ -2388,3 +2388,85 @@ tests cover the derangement (no fixed point over n=2..24 × 30 seeds) and the sp
 
 Caveat recorded in the script header: the renderer was also trained on the train split, so the
 train lanes measure memorisation of the pipeline, not of the LM alone.
+
+---
+
+## 2026-09-05 — The failure is scene control, not clarity or overfitting (job 442814)
+
+`run_tamia_a2s_rescore_split_seed.sbatch` scored the 36 lanes of 442808. Three results, two of
+which close off directions that had looked live.
+
+**Overfitting is not the cause.** Pooled by clip, with the clip as the unit:
+
+| checkpoint | split | clips | ref_wer | longest_span |
+|---|---|---|---|---|
+| best_loss (ep9) | train | 8 | 1.203 | 0.83 |
+| best_loss | val | 8 | 1.500 | 0.69 |
+| best (~ep90) | train | 8 | 1.287 | **1.06** |
+| best | val | 8 | 1.318 | 0.83 |
+| best | test | 8 | 1.258 | 0.69 |
+
+At `best`, train_code_loss is 0.21 — the LM has all but memorised the training token sequences
+— and the rendered train audio is indistinguishable from val. Against a mismatched-reference
+baseline of ~1.1 words and a verbatim ceiling of 13, every cell is at chance. val and test
+agree, so there is no split problem. **Overfitting is real, severe, and irrelevant to what we
+hear.** Stop investigating it.
+
+**Reference-based scoring was the wrong instrument**, and job 442799 says why: exact-word
+recovery tops out at f1 0.16 even when the model is handed the ground-truth caption. The
+scene-to-utterance map is one-to-many. Scoring against the held-out transcript mostly measures
+which of many valid utterances got drawn. `score_memorisation.py` remains valid for the
+memorisation question it was built for; it is simply not a coherence metric.
+
+**Clarity is not the cause.** Positional inter-ASR agreement (Whisper vs CTC on the same audio,
+by word position) on the strongest lane:
+
+```
+                             1    2    3    4    5    6    7    8    9   10
+REAL SPEECH (ceiling)     0.88 0.81 0.75 0.44 0.56 0.56 0.47 0.53 0.43 0.54
+LM k2048 best t1.0        0.62 0.75 0.38 0.44 0.50 0.50 0.40 0.53 0.47 0.62
+zero (noise floor)        0.06 0.00 0.07 0.00 0.00 0.00 0.00 0.00 0.00 0.00
+```
+
+The LM lane tracks real speech out to word 10. The phonemes stay clean.
+
+**Scene control is the cause.** Cross-seed agreement — same ambient clip, six different noises:
+
+```
+position     1     2     3     4     5     6     7     8
+agreement  0.20  0.20  0.17  0.12  0.00  0.00  0.02  0.00
+```
+
+A four-word horizon and then a cliff, not a decay. Qualitatively, on one motorcycle clip all
+six seeds are about starting an engine and four of six open "let me tweak / let me check / let
+me give"; on another, four of six open "let me adjust the…". The scene pins the opening and
+then stops mattering. This is the user's "3-4 words make sense, then randomly another group
+starts", as a number.
+
+### Next: classifier-free guidance (`run_tamia_a2s_cfg_horizon.sbatch`)
+
+If the ambient's influence is present but under-weighted at later positions, amplifying it
+should extend the horizon. At generation time, no retraining:
+
+```
+log p = log p(mismatched scene) + w * [ log p(true scene) - log p(mismatched) ]
+```
+
+The unconditional branch is a rolled batch, matching `shuffled_memory`'s reasoning that a
+zeroed memory is out of distribution. Only the code head is guided — guiding duration risks
+run lengths that no longer fill the 256-frame canvas. w=1 is bit-identical to the current
+sampler (asserted in the wiring test).
+
+30 lanes: w ∈ {1.0, 1.5, 2.5, 4.0} × 6 seeds, plus a **greedy control** (top_k=1) whose six
+seeds differ only in diffusion noise. That control is the ceiling — it says how much cross-seed
+agreement the renderer permits at all from identical codes, and without it 0.20 is
+uninterpretable.
+
+New metric `scripts/a2s/score_plan_horizon.py` reports both curves and validates against
+442814's data, reproducing its curve exactly (horizon 4 at `best`, 3 at `best_loss`).
+
+**Two ways this fails and what each means.** Horizon flat in w → the ambient's contribution is
+absent from later positions rather than under-weighted, which rules out decode-time fixes and
+points at the training objective or the unit (BPE over content codes, written in
+`src/salm/a2s/content_bpe.py`, never run). Cross-seed rises while inter-ASR collapses →
+guidance is buying determinism by driving codes off-manifold; a ceiling on w, not a win.

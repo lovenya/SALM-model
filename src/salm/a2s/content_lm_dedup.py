@@ -143,6 +143,7 @@ class ContentLMDedup(nn.Module):
         temperature: float = 1.0,
         dur_temperature: float | None = None,
         top_k: int = 0,
+        cfg_scale: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> tuple[list[list[int]], list[list[int]]]:
         """
@@ -154,11 +155,45 @@ class ContentLMDedup(nn.Module):
         discrete formulation exists to escape. `dur_temperature` defaults to `temperature`;
         it is separable because duration is a far lower-entropy variable than code identity
         and may want sharper sampling.
+
+        CLASSIFIER-FREE GUIDANCE (`cfg_scale` > 1). Measured on job 442814, cross-seed
+        agreement on a fixed ambient clip collapses after roughly the fourth word: 0.20, 0.20,
+        0.17, 0.12, then 0.00. Positional inter-ASR agreement over the same audio stays near
+        the real-speech curve throughout, so the later words are clearly articulated -- they
+        are simply no longer pinned by the scene. The model stops using the ambient long
+        before it stops speaking.
+
+        Guidance attacks exactly that. At every step the step logits are extrapolated away
+        from what the model would say under a DIFFERENT scene:
+
+            log p  =  log p(mismatched)  +  w * [ log p(true) - log p(mismatched) ]
+
+        so whatever the true ambient contributes is amplified at every position, not only
+        where the model was already inclined to use it. w = 1 is exactly the unguided model.
+
+        The unconditional branch is a rolled batch, not a zeroed memory. That is the same
+        choice `shuffled_memory` documents for the scene ablation: a zeroed memory is out of
+        distribution, so extrapolating away from it would push the sequence off-manifold for
+        reasons unrelated to the scene, whereas a rolled memory is a real ambient encoding
+        that simply belongs to another row. It therefore needs a batch of at least 2.
+
+        Only the CODE head is guided. Duration is low-entropy and controls the frame budget;
+        extrapolating it risks run lengths that no longer sum to a valid 256-frame canvas,
+        which would corrupt the render for reasons that have nothing to do with content.
         """
         b = ambient.shape[0]
         device = ambient.device
         dt = temperature if dur_temperature is None else dur_temperature
         memory = self.encode_ambient(ambient)
+        mem_uncond = None
+        if cfg_scale != 1.0:
+            if b < 2:
+                raise ValueError(
+                    f"cfg_scale={cfg_scale} needs a batch of >= 2 so the unconditional branch "
+                    f"can be a DIFFERENT scene's memory; got batch {b}. Roll on a batch of 1 "
+                    f"returns the same memory and guidance would silently do nothing."
+                )
+            mem_uncond = torch.roll(memory, shifts=1, dims=0)
 
         codes_in = torch.full((b, 1), self.bos_id, dtype=torch.long, device=device)
         durs_in = torch.zeros((b, 1), dtype=torch.long, device=device)
@@ -179,6 +214,14 @@ class ContentLMDedup(nn.Module):
         for _ in range(self.max_tokens):
             cl, dl = self.forward(ambient, codes_in, durs_in, memory=memory)
             cl, dl = cl[:, -1], dl[:, -1]
+            if mem_uncond is not None:
+                cu, _ = self.forward(ambient, codes_in, durs_in, memory=mem_uncond)
+                # Combine in LOG-PROBABILITY space, not raw logits: the two branches have no
+                # reason to share a normalisation constant, so extrapolating unnormalised
+                # logits would mix in an arbitrary per-branch offset.
+                lp_c = torch.log_softmax(cl, dim=-1)
+                lp_u = torch.log_softmax(cu[:, -1], dim=-1)
+                cl = lp_u + cfg_scale * (lp_c - lp_u)
 
             nxt_code = _pick(cl, temperature).squeeze(1)              # (B,) in 0..K (K=EOS)
             nxt_dur = _pick(dl, dt).squeeze(1) + 1                    # (B,) in 1..max_run

@@ -376,6 +376,13 @@ def main() -> int:
                          "head (0 = use --content-lm-temperature). Separable because duration "
                          "is far lower-entropy than code identity (median 1, mean ~1.8), so "
                          "it usually wants sharper sampling than the codes do")
+    ap.add_argument("--content-lm-cfg", type=float, default=1.0,
+                    help="Classifier-free guidance scale for the content LM's code head. "
+                         "1.0 = unguided (identical to before). >1 extrapolates away from what "
+                         "the model would say under a DIFFERENT scene, amplifying the ambient's "
+                         "influence at EVERY step -- aimed at the measured collapse of "
+                         "scene-determinism after ~4 words. Costs one extra forward per step "
+                         "and needs a batch of >= 2. Dedup checkpoints only.")
     ap.add_argument("--content-lm-top-k", type=int, default=0,
                     help="codebook_lm: truncate sampling to the k most likely codes (0=off)")
     ap.add_argument("--content-lm-top-p", type=float, default=0.0,
@@ -665,6 +672,16 @@ def main() -> int:
                         f"{content_lm.num_parameters()/1e6:.2f}M params, "
                         f"K={content_lm.num_codes}, epoch={lm_payload.get('epoch')}, "
                         f"scene_gap={m.get('val_scene_gap', float('nan')):+.4f}")
+                # CFG is implemented only on the run-length sampler. Passing it with a
+                # frame-level checkpoint would silently generate unguided audio and be
+                # written up as "guidance did nothing", which is a wrong conclusion, not a
+                # missing feature.
+                if args.content_lm_cfg != 1.0 and not lm_is_dedup:
+                    raise SystemExit(
+                        f"--content-lm-cfg={args.content_lm_cfg} requires a dedup (run-length) "
+                        f"content-LM checkpoint; this one is frame-level. Guidance is not "
+                        f"implemented for that sampler and would silently be ignored."
+                    )
                 log(f"    sampling: temperature={args.content_lm_temperature} "
                     f"top_k={args.content_lm_top_k} top_p={args.content_lm_top_p}")
 
@@ -910,6 +927,7 @@ def main() -> int:
                             temperature=args.content_lm_temperature,
                             dur_temperature=(args.content_lm_dur_temperature or None),
                             top_k=args.content_lm_top_k,
+                            cfg_scale=args.content_lm_cfg,
                             generator=lm_generator,
                         )
                         frames = np.stack([
@@ -919,7 +937,8 @@ def main() -> int:
                         sampled = torch.from_numpy(frames).long().to(args.device)
                         n_tok = [len(t) for t in tok_rows]
                         log(f"      sampled {n_tok[0]} run-length tokens -> {CTC_FRAMES} "
-                            f"frames (row 0); batch mean {np.mean(n_tok):.1f} tokens")
+                            f"frames (row 0); batch mean {np.mean(n_tok):.1f} tokens"
+                            + (f"; CFG w={args.content_lm_cfg}" if args.content_lm_cfg != 1.0 else ""))
                     else:
                         sampled = content_lm.sample(
                             feats.float(),
