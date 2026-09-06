@@ -55,6 +55,7 @@ from salm.a2s.content_dedup import dedup_batch, stats as dedup_stats    # noqa: 
 from salm.a2s.content_lm_dedup import (                                 # noqa: E402
     ContentLMDedup,
     build_teacher_forcing,
+    plan_targets,
 )
 
 
@@ -174,6 +175,11 @@ def main() -> int:
     ap.add_argument("--layers", type=int, default=6)
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--use-plan", action="store_true",
+                    help="Predict a bag-of-codes plan from the ambient and add it to every "
+                         "token embedding. Targets the measured ~20-token plan horizon.")
+    ap.add_argument("--lambda-plan", type=float, default=1.0,
+                    help="Weight on the plan's auxiliary BCE loss. Only used with --use-plan.")
     ap.add_argument("--lambda-dur", type=float, default=1.0,
                     help="weight on the duration loss. 1.0 by default: both heads matter, and "
                          "a dead duration head makes the expanded frames garbage no matter "
@@ -224,6 +230,7 @@ def main() -> int:
     model = ContentLMDedup(
         num_codes=K, max_run=args.max_run, ambient_dim=ambient_dim, max_tokens=max_tokens,
         d_model=args.d_model, n_layers=args.layers, n_heads=args.heads, dropout=args.dropout,
+        use_plan=args.use_plan,
     ).to(args.device)
     log(f"ContentLMDedup: {model.num_parameters()/1e6:.2f}M params, K={K}, "
         f"max_run={args.max_run}, up to {max_tokens} tokens")
@@ -246,7 +253,7 @@ def main() -> int:
         model.train()
         t0 = time.time()
         order = rng.permutation(n_train)
-        run_c = run_d = 0.0
+        run_c = run_d = run_p = 0.0
         nb = 0
         for bi in range(steps):
             sel = np.sort(order[bi * args.batch_size : (bi + 1) * args.batch_size])
@@ -265,6 +272,20 @@ def main() -> int:
             ld = F.cross_entropy(dl.reshape(-1, args.max_run), tf["dur_tgt"].reshape(-1),
                                  ignore_index=-100)
             loss = lc + args.lambda_dur * ld
+            lp_val = 0.0
+            if args.use_plan:
+                # Supervise the plan directly. Without this the plan_proj is zero-initialised
+                # and has no gradient path that distinguishes it from any other bias, so it
+                # would learn nothing useful and the experiment would silently be a no-op.
+                mem = model.encode_ambient(a)
+                plan_logits = model.predict_plan(mem)
+                plan_tgt = plan_targets(
+                    torch.from_numpy(tok_tr[sel]).to(args.device),
+                    torch.from_numpy(len_tr[sel]).to(args.device), K,
+                )
+                lp = F.binary_cross_entropy_with_logits(plan_logits, plan_tgt)
+                loss = loss + args.lambda_plan * lp
+                lp_val = float(lp)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -273,7 +294,8 @@ def main() -> int:
             if step < total - 1:
                 sched.step()
             step += 1
-            run_c += float(lc.detach()); run_d += float(ld.detach()); nb += 1
+            run_c += float(lc.detach()); run_d += float(ld.detach())
+            run_p += lp_val; nb += 1
 
         want_sample = (args.sample_every > 0
                        and ((epoch + 1) % args.sample_every == 0 or epoch == args.epochs - 1))
@@ -284,15 +306,22 @@ def main() -> int:
             "epoch": epoch,
             "train_code_loss": run_c / max(nb, 1),
             "train_dur_loss": run_d / max(nb, 1),
+            # Logged every epoch even when the plan is off (then it is a constant 0.0). A plan
+            # arm whose value never moves means the head learned nothing and plan_proj stayed
+            # near zero -- the run is a no-op, not a null result, and must not be read as one.
+            "train_plan_loss": run_p / max(nb, 1),
             "epoch_minutes": (time.time() - t0) / 60.0,
             "lr": float(opt.param_groups[0]["lr"]),
             "cfg_dropout": args.dropout, "cfg_weight_decay": args.weight_decay,
             "cfg_layers": args.layers, "cfg_max_run": args.max_run,
             "cfg_lambda_dur": args.lambda_dur, "cfg_num_codes": K,
+            "cfg_use_plan": args.use_plan, "cfg_lambda_plan": args.lambda_plan,
             "true_mean_tokens": float(len_va.mean()),
         })
         history.append(m)
-        log(f"  ep {epoch:03d} train(c {m['train_code_loss']:.3f} d {m['train_dur_loss']:.3f}) "
+        plan_str = f" p {m['train_plan_loss']:.4f}" if args.use_plan else ""
+        log(f"  ep {epoch:03d} train(c {m['train_code_loss']:.3f} d {m['train_dur_loss']:.3f}"
+            f"{plan_str}) "
             f"val(c {m['val_code_loss']:.3f} d {m['val_dur_loss']:.3f}) "
             f"SCENE_GAP={m['val_scene_gap']:+.4f} dur_acc={m['val_dur_acc']:.3f} "
             + (f"tok={m['val_pred_tokens']:.0f}/{m['true_mean_tokens']:.0f} "
@@ -306,7 +335,7 @@ def main() -> int:
             "ambient_dim": ambient_dim, "max_tokens": max_tokens,
             "d_model": args.d_model, "layers": args.layers, "heads": args.heads,
             "codes": cb["codes"],          # rides along so generation needs one file
-            "dedup": True,
+            "dedup": True, "use_plan": args.use_plan,
         }
         torch.save(payload, run_dir / "checkpoints" / "checkpoint_last.pt")
         if m["val_scene_gap"] > best_gap:

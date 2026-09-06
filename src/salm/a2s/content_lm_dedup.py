@@ -62,6 +62,7 @@ class ContentLMDedup(nn.Module):
         n_heads: int = 8,
         ff_mult: int = 4,
         dropout: float = 0.1,
+        use_plan: bool = False,
     ) -> None:
         super().__init__()
         self.num_codes = int(num_codes)
@@ -93,9 +94,62 @@ class ContentLMDedup(nn.Module):
         nn.init.normal_(self.ambient_pos, std=0.02)
         nn.init.normal_(self.token_pos, std=0.02)
 
+        # ---- THE PLAN VECTOR (optional; off by default so old checkpoints still load)
+        #
+        # WHY. Measured on jobs 442814/443475: cross-seed agreement on a fixed ambient clip is
+        # 0.20 0.20 0.17 0.12 and then 0.00 -- the scene controls roughly four words and then
+        # stops mattering, while the audio stays clearly articulated. Converted to tokens, the
+        # model holds ~20 run-length tokens of plan and one utterance needs ~56. Compression
+        # cannot close that: it shrinks both sides equally, which is why run-length's 2.0x
+        # bought so little. The only remaining lever is the numerator.
+        #
+        # The ambient IS already cross-attended at every step, so the information is available
+        # throughout. What is missing is COMMITMENT: nothing forces the model to decide, once,
+        # what this utterance is going to be, so it re-derives its intent from the last few
+        # tokens at every step and drifts.
+        #
+        # WHAT THE PLAN IS: a predicted distribution over which content codes will appear
+        # anywhere in this utterance -- a bag of codes, deliberately order-free so it is a plan
+        # and not a copy of the sequence. It is projected and ADDED to every token embedding,
+        # so it biases all 256 steps rather than being one more thing to attend to.
+        #
+        # WHY A DISTRIBUTION AND NOT AN EMBEDDING. This project's founding result is that
+        # `argmin E[(f(x)-y)^2] = E[y|x]`, and for symbolic targets the conditional mean is
+        # off-manifold -- the average of five utterances is not an utterance. A regressed plan
+        # EMBEDDING would walk straight back into that. A distribution over codes does not: the
+        # average of several valid distributions is itself a valid distribution. The plan is
+        # allowed to be uncertain, and uncertainty in it is meaningful rather than degenerate.
+        # This is the same reasoning that moved the content targets from regression to discrete
+        # codes, applied one level up.
+        #
+        # CONSTRUCTED LAST, ON PURPOSE. Creating these modules draws from the RNG, so building
+        # them before the positional-embedding init would give a use_plan=True model different
+        # ambient_pos/token_pos values than its use_plan=False twin at the same seed. The
+        # ablation would then compare two different initialisations and quietly attribute the
+        # difference to the plan.
+        self.use_plan = bool(use_plan)
+        if self.use_plan:
+            self.plan_head = nn.Sequential(
+                nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, num_codes),
+            )
+            self.plan_proj = nn.Linear(num_codes, d_model)
+            # Zero-init so an untrained plan contributes exactly nothing and the model starts
+            # identical to the no-plan baseline. Any gain is then attributable to the plan
+            # rather than to a different initialisation.
+            nn.init.zeros_(self.plan_proj.weight)
+            nn.init.zeros_(self.plan_proj.bias)
+
     def encode_ambient(self, ambient: torch.Tensor) -> torch.Tensor:
         x = self.ambient_proj(ambient)
         return x + self.ambient_pos[:, : x.shape[1]]
+
+    def predict_plan(self, memory: torch.Tensor) -> torch.Tensor:
+        """(B, A, d_model) ambient memory -> (B, num_codes) logits over the utterance's codes.
+
+        Mean-pooled over the ambient frames: the plan is a property of the whole scene, and
+        pooling makes it independent of where in the clip the evidence sits.
+        """
+        return self.plan_head(memory.mean(dim=1))
 
     def forward(
         self,
@@ -126,6 +180,11 @@ class ContentLMDedup(nn.Module):
                 f"build the model with max_tokens >= {s - 1}"
             )
         x = self.code_embed(codes_in) + self.dur_embed(durs_in) + self.token_pos[:, :s]
+        if self.use_plan:
+            # Broadcast one plan bias across every position. Sigmoid, not softmax: this is a
+            # multi-label question ("does code k appear at all"), not a choice among codes.
+            plan = torch.sigmoid(self.predict_plan(memory))
+            x = x + self.plan_proj(plan).unsqueeze(1)
         causal = torch.triu(
             torch.ones(s, s, device=codes_in.device, dtype=torch.bool), diagonal=1
         )
@@ -279,6 +338,23 @@ class ContentLMDedup(nn.Module):
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
+
+
+def plan_targets(tokens: torch.Tensor, lengths: torch.Tensor, num_codes: int) -> torch.Tensor:
+    """
+    Padded (B, L) run-length tokens + (B,) lengths -> (B, num_codes) multi-hot bag of codes.
+
+    1.0 where that code appears anywhere in the row's REAL tokens, 0 elsewhere. Order-free by
+    construction: the plan says which codes this utterance is made of, never in what sequence.
+    Padding must be masked out or every row inherits whatever sits in its padded slots, which
+    would make the target nearly constant across the batch and the auxiliary loss meaningless.
+    """
+    b, l = tokens.shape
+    valid = torch.arange(l, device=tokens.device).unsqueeze(0) < lengths.unsqueeze(1)
+    out = torch.zeros((b, num_codes), device=tokens.device)
+    idx = tokens.clamp(0, num_codes - 1)
+    out.scatter_add_(1, idx, valid.to(out.dtype))
+    return (out > 0).to(out.dtype)
 
 
 def build_teacher_forcing(

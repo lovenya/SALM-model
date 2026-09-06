@@ -633,6 +633,8 @@ def main() -> int:
                         d_model=int(lm_payload["d_model"]),
                         n_layers=int(lm_payload["layers"]),
                         n_heads=int(lm_payload["heads"]),
+                        # Absent in pre-plan checkpoints; default False keeps them loadable.
+                        use_plan=bool(lm_payload.get("use_plan", False)),
                     ).to(args.device)
                     content_lm.load_state_dict(lm_payload["model"])
                     content_lm.eval()
@@ -652,6 +654,8 @@ def main() -> int:
                         d_model=int(lm_payload["d_model"]),
                         n_layers=int(lm_payload["layers"]),
                         n_heads=int(lm_payload["heads"]),
+                        # Absent in pre-plan checkpoints; default False keeps them loadable.
+                        use_plan=bool(lm_payload.get("use_plan", False)),
                     ).to(args.device)
                     content_lm.load_state_dict(lm_payload["model"])
                     content_lm.eval()
