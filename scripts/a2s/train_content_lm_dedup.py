@@ -175,6 +175,10 @@ def main() -> int:
     ap.add_argument("--layers", type=int, default=6)
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--n-think", type=int, default=0,
+                    help="Learnable latent 'think' tokens prepended to the decoder input. The "
+                         "model computes over them and the ambient before emitting any code; "
+                         "their outputs are discarded. 0 = the old model exactly.")
     ap.add_argument("--use-plan", action="store_true",
                     help="Predict a bag-of-codes plan from the ambient and add it to every "
                          "token embedding. Targets the measured ~20-token plan horizon.")
@@ -230,7 +234,7 @@ def main() -> int:
     model = ContentLMDedup(
         num_codes=K, max_run=args.max_run, ambient_dim=ambient_dim, max_tokens=max_tokens,
         d_model=args.d_model, n_layers=args.layers, n_heads=args.heads, dropout=args.dropout,
-        use_plan=args.use_plan,
+        use_plan=args.use_plan, n_think=args.n_think,
     ).to(args.device)
     log(f"ContentLMDedup: {model.num_parameters()/1e6:.2f}M params, K={K}, "
         f"max_run={args.max_run}, up to {max_tokens} tokens")
@@ -316,6 +320,7 @@ def main() -> int:
             "cfg_layers": args.layers, "cfg_max_run": args.max_run,
             "cfg_lambda_dur": args.lambda_dur, "cfg_num_codes": K,
             "cfg_use_plan": args.use_plan, "cfg_lambda_plan": args.lambda_plan,
+            "cfg_n_think": args.n_think,
             "true_mean_tokens": float(len_va.mean()),
         })
         history.append(m)
@@ -335,7 +340,7 @@ def main() -> int:
             "ambient_dim": ambient_dim, "max_tokens": max_tokens,
             "d_model": args.d_model, "layers": args.layers, "heads": args.heads,
             "codes": cb["codes"],          # rides along so generation needs one file
-            "dedup": True, "use_plan": args.use_plan,
+            "dedup": True, "use_plan": args.use_plan, "n_think": args.n_think,
         }
         torch.save(payload, run_dir / "checkpoints" / "checkpoint_last.pt")
         if m["val_scene_gap"] > best_gap:

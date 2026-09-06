@@ -63,6 +63,7 @@ class ContentLMDedup(nn.Module):
         ff_mult: int = 4,
         dropout: float = 0.1,
         use_plan: bool = False,
+        n_think: int = 0,
     ) -> None:
         super().__init__()
         self.num_codes = int(num_codes)
@@ -93,6 +94,31 @@ class ContentLMDedup(nn.Module):
 
         nn.init.normal_(self.ambient_pos, std=0.02)
         nn.init.normal_(self.token_pos, std=0.02)
+
+        # ---- LATENT THINKING TOKENS (optional; 0 = exactly the old model)
+        #
+        # WHY. A transformer keeps no persistent state. An RNN carries a hidden vector forward
+        # and UPDATES it, so an intent accumulates; a transformer recomputes everything from the
+        # surface tokens at every step. This model can see what it emitted but must re-infer
+        # WHY from the tokens alone, each step, and nothing forces the answer at step 40 to
+        # match step 5. Measured consequence (job 442814): cross-seed agreement 0.20 0.20 0.17
+        # 0.12 then 0.00 -- the intent has quietly become something else by word four.
+        #
+        # These are `n_think` learnable vectors prepended to the decoder input. The model runs
+        # full self-attention over them and cross-attention to the ambient BEFORE emitting any
+        # code, then their outputs are discarded. Pure extra computation in latent space, with
+        # no token ever produced from them -- thinking, not chain-of-thought.
+        #
+        # WHY THIS AND NOT ANOTHER PLAN VECTOR. The plan vector (job 443751) came back null,
+        # and the reason was instructive: its bag-of-codes target beat a SCENE-BLIND marginal
+        # by 0.0040 nats, so the model was asked to commit to something that carried almost no
+        # scene information. That was a target-choice failure, mine. Think tokens require no
+        # target at all -- the model decides what is worth computing and is trained end to end
+        # on the same objective -- so they cannot inherit the same mistake.
+        self.n_think = int(n_think)
+        if self.n_think > 0:
+            self.think_tokens = nn.Parameter(torch.zeros(1, self.n_think, d_model))
+            nn.init.normal_(self.think_tokens, std=0.02)
 
         # ---- THE PLAN VECTOR (optional; off by default so old checkpoints still load)
         #
@@ -188,10 +214,28 @@ class ContentLMDedup(nn.Module):
         causal = torch.triu(
             torch.ones(s, s, device=codes_in.device, dtype=torch.bool), diagonal=1
         )
+        if self.n_think > 0:
+            # Prepended, so every real position can attend to all of them under the causal
+            # mask while they attend only to each other and to the ambient memory.
+            x = torch.cat([self.think_tokens.expand(x.shape[0], -1, -1), x], dim=1)
+            s = x.shape[1]
+            if pad_mask is not None:
+                pad_mask = torch.cat([
+                    torch.zeros((pad_mask.shape[0], self.n_think), dtype=pad_mask.dtype,
+                                device=pad_mask.device),
+                    pad_mask,
+                ], dim=1)
+            causal = torch.triu(
+                torch.ones(s, s, device=codes_in.device, dtype=torch.bool), diagonal=1
+            )
         h = self.decoder(
             tgt=x, memory=memory, tgt_mask=causal, tgt_key_padding_mask=pad_mask
         )
         h = self.norm(h)
+        if self.n_think > 0:
+            # Discard the think positions so the caller sees the same (B, S, .) contract as
+            # the no-think model. Every loss, mask and sampling index downstream is unchanged.
+            h = h[:, self.n_think:]
         return self.code_head(h), self.dur_head(h)
 
     @torch.no_grad()

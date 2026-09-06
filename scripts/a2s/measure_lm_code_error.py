@@ -54,6 +54,7 @@ def main() -> int:
         max_tokens=int(pay["max_tokens"]), d_model=int(pay["d_model"]),
         n_layers=int(pay["layers"]), n_heads=int(pay["heads"]),
         use_plan=bool(pay.get("use_plan", False)),
+        n_think=int(pay.get("n_think", 0)),
     ).to(args.device)
     model.load_state_dict(pay["model"])
     model.eval()
