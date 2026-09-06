@@ -48,6 +48,11 @@ def main() -> int:
     ap.add_argument("--lanes", nargs="*", default=None,
                     help="substrings selecting which lane dirs to include (default: all)")
     ap.add_argument("--max-clips", type=int, default=0, help="0 = every clip")
+    ap.add_argument("--require-all-lanes", action="store_true",
+                    help="Keep only clips present in EVERY lane. Essential for an A/B bundle: "
+                         "lanes with different clip counts otherwise produce folders holding "
+                         "one side of the comparison, which is worse than useless because it "
+                         "looks complete.")
     args = ap.parse_args()
 
     root, out = Path(args.gen_root), Path(args.out)
@@ -72,6 +77,15 @@ def main() -> int:
             meta.setdefault(r["sample_id"], r)
 
     ids = sorted(clips)
+    if args.require_all_lanes:
+        want = len(lane_dirs)
+        dropped = [s for s in ids if len(clips[s]) < want]
+        ids = [s for s in ids if len(clips[s]) == want]
+        if dropped:
+            print(f"  dropped {len(dropped)} clips missing from at least one lane "
+                  f"({len(ids)} complete clips remain)")
+        if not ids:
+            raise SystemExit("no clip appears in every lane -- nothing to compare")
     if args.max_clips:
         ids = ids[: args.max_clips]
     out.mkdir(parents=True, exist_ok=True)
