@@ -146,6 +146,7 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
+    import librosa
     import onnxruntime as ort
 
     prov = ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -165,7 +166,13 @@ def main() -> int:
         if wav.ndim > 1:
             wav = wav.mean(axis=1)
         if sr != 16000:
-            raise SystemExit(f"expected 16 kHz, got {sr} -- the tokenizer assumes 16 kHz")
+            # TTAS speech is stored at 24 kHz; CosyVoice's tokenizer is specified at 16 kHz
+            # (its frontend calls load_wav(prompt_wav, 16000)). Resample rather than refuse --
+            # job 444053 died here in 12 seconds because this asserted instead. Doing it with
+            # librosa's default (soxr_hq) rather than naive decimation: the tokenizer is a
+            # Whisper-derived encoder and aliasing artefacts would land squarely in the band
+            # it reads.
+            wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
         feat = whisper_log_mel(wav)[None].astype(np.float32)
         out = sess.run(None, {in0: feat, in1: np.array([feat.shape[2]], dtype=np.int32)})[0]
         cosy.append(np.asarray(out).flatten().astype(np.int64))

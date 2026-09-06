@@ -189,6 +189,7 @@ for pair in "continuous:$A_CONT" "quantized:$A_QUANT"; do
     d2="$OUT_ROOT/${label}__oracle_quant"; mkdir -p "$d2"
     CUDA_VISIBLE_DEVICES=0 python -m salm.generate --mode a2s --direction a2s \
         --checkpoint "$ck" --content-source oracle_quantized \
+        --content-codebook "$OUTPUTS_ROOT/content_codebook/codebook_k${K}.pt" \
         --content-lm-checkpoint "$LM_CKPT" --ctc-checkpoint "$CTC_CKPT" \
         --split val --num-samples "$NGEN" --start-index 0 --seed 1337 \
         --out-dir "$d2" --copy-reference > "$d2.log" 2>&1 || echo "  FAILED: ${label} oracle" >&2
