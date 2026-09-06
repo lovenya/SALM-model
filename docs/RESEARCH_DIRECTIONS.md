@@ -100,9 +100,13 @@ Our content comes from a CTC-trained BiGRU. CTC representations are notoriously 
 most frames confidently blank, information in sparse spikes -- which is a poor match for a
 per-frame conditioning signal. Options:
 
-- **A temporal pre-net** (dilated Conv1d / ConvNeXt-1D over the 256x512 sequence) to smear
-  spikes into phone-duration plateaus. F5's ConvNeXt refinement is the precedent, though
-  their motivation differs (they are fixing *mis*-alignment; ours is already correct).
+- ~~**A temporal pre-net** (dilated Conv1d / ConvNeXt-1D) to smear spikes into phone-duration
+  plateaus.~~ **KILLED ON MEASUREMENT, 2026-09-06.** The premise is false for our codes. CTC
+  *posteriors* are peaky and blank-dominated; we use the *encoder hidden states* before the
+  output layer, and they are not. Measured on the cached train codes: every code used (512/512
+  and 2048/2048), top-1 code covers 2.2% / 0.7%, top-10 covers 18.5% / 6.0%, effective
+  vocabulary 239/512 and 883/2048. Mean run length 2.00 / 1.70 frames = **80 / 68 ms**, which
+  is already phone-scale. The plateaus this pre-net would create are there.
 - **Self-supervised speech features** -- HuBERT / WavLM / w2v-BERT at 50 Hz, pooled x2 to our
   25 fps. BVS's ablation found SSL tokens beat a text/transcript representation decisively
   (26.4% vs 98.7% WER) on the closest published task to ours.
@@ -272,6 +276,47 @@ metric is too coarse to see it. A per-scene-family diversity measure is the open
 
 **Also required with it:** `checkpoint_best_loss`, not `checkpoint_best`. See LEARNINGS on
 selection metrics -- `best` is chosen on `val_scene_gap`, which rises with overfitting.
+
+### D9. The content LM is ~97% a LANGUAGE model -- and that is the bottleneck
+
+*Measured 2026-09-06, from the dedup runs' own history.json*
+
+| run | val_code_loss | scene_gap | the scene's share |
+|---|---|---|---|
+| dedup_k512 | 1.5002 | +0.0414 | **2.8%** |
+| dedup_k1024 | 1.6213 | +0.0370 | **2.3%** |
+| dedup_k2048 | 1.7588 | +0.0322 | **1.8%** |
+
+`scene_gap` is the entire contribution of knowing WHICH scene this is. Everything else -- 97%
+and up -- is language modelling over code sequences, learned from 17,596 utterances.
+
+**Four independent measurements now agree, and they were not designed to:**
+- exact-word recovery f1 0.16 even from a ground-truth caption (job 442799)
+- the plan head beat a scene-blind marginal by 0.0040 nats (443751)
+- cross-seed agreement collapses after ~4 words (442814)
+- the scene accounts for under 3% of the LM's loss (above)
+
+**The reframe.** The scene constrains the OPENING and the TOPIC. It was never going to
+constrain word 7, and no conditioning machinery changes that -- which is exactly why CFG
+(442847), the plan vector (443751) and guidance all landed where they did. Those were not
+failures of implementation; they were attempts to extract information that is not present.
+
+So the coherence complaint -- "3-4 words make sense, then another group starts" -- is a
+LANGUAGE-MODELLING failure, not a conditioning failure. After word 4 the model should be
+producing fluent speech constrained only by topic. It cannot, because it is a weak LM over
+2048 acoustic codes trained on 17k utterances.
+
+**What follows, and the constraint that shapes it.** The obvious move is to pretrain the
+content LM on unpaired speech -- any audio converts to codes through the existing CTC probe and
+codebook, no ambient needed. **We do not have unpaired speech.** `datasets/` holds only TTAS
+(22,793 clips, of which 17,596 are already train). Acquiring a corpus is a download decision,
+not an engineering one.
+
+That is the strongest argument for D5: CosyVoice3's `llm.pt` is a pretrained language model
+over its own 25 Hz token space, already on scratch. It supplies exactly the prior this
+measurement says we lack, without needing a speech corpus we do not have. Gate first
+(tokenize -> resynthesize through frozen flow+hift -> ASR, ~15 min) before committing.
+BLOCKED on `uv pip install onnxruntime` -- the tokenizer is ONNX and the runtime is absent.
 
 ## Considered and rejected
 
