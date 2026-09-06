@@ -45,7 +45,7 @@ import itertools
 import json
 import statistics as st
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -89,15 +89,18 @@ def transcribe_dir(gen_dir: Path, whisper, ctc, batch_size: int):
         wavs.append(w.mean(axis=1) if w.ndim > 1 else w)
     wh = whisper.transcribe(wavs, batch_size=batch_size)
     ct = ctc.transcribe(wavs, batch_size=batch_size)
-    return {r["sample_id"]: (normalize_text(a).split(), normalize_text(b).split())
-            for r, a, b in zip(rows, wh, ct)}
+    caps = {r["sample_id"]: (r.get("audio_cap") or "") for r in rows}
+    out = {r["sample_id"]: (normalize_text(a).split(), normalize_text(b).split())
+           for r, a, b in zip(rows, wh, ct)}
+    out["__captions__"] = caps          # sentinel key, stripped by every consumer
+    return out
 
 
 def curve_cross_seed(per_lane: list[dict]) -> dict[int, float]:
     """Agreement between seed lanes at each position, averaged over clips."""
     by_clip = defaultdict(list)
     for lane in per_lane:
-        for sid, (wh, _) in lane.items():
+        for sid, (wh, _) in ((k, v) for k, v in lane.items() if k != "__captions__"):
             by_clip[sid].append(wh)
     pos = defaultdict(list)
     for sid, variants in by_clip.items():
@@ -122,7 +125,7 @@ def curve_cross_seed(per_lane: list[dict]) -> dict[int, float]:
 def curve_inter_asr(per_lane: list[dict]) -> dict[int, float]:
     pos = defaultdict(list)
     for lane in per_lane:
-        for _sid, (wh, ct) in lane.items():
+        for _sid, (wh, ct) in ((k, v) for k, v in lane.items() if k != "__captions__"):
             for p in range(min(len(wh), len(ct), MAXPOS)):
                 pos[p].append(1.0 if wh[p] == ct[p] else 0.0)
     return {p: st.mean(v) for p, v in sorted(pos.items()) if len(v) >= MIN_OBS}
@@ -145,7 +148,7 @@ def cross_clip_diversity(per_lane: list[dict]) -> float:
     from salm.a2s.wer import word_edit_distance
     texts = []
     for lane in per_lane:
-        for sid, (wh, _) in lane.items():
+        for sid, (wh, _) in ((k, v) for k, v in lane.items() if k != "__captions__"):
             texts.append((sid, wh))
     dists = []
     for (sa, a), (sb, b) in itertools.combinations(texts, 2):
@@ -153,6 +156,90 @@ def cross_clip_diversity(per_lane: list[dict]) -> float:
             continue           # same clip across seeds is diversity we already measure
         dists.append(word_edit_distance(a, b) / max(len(a), len(b), 1))
     return st.mean(dists) if dists else float("nan")
+
+
+STOP = {"a","an","the","is","are","was","were","of","in","on","at","and","or","with","by",
+        "as","to","for","from","it","its","this","that","while","being","made","sound",
+        "sounds","noise","occurring","present","followed","then","some","someone"}
+
+
+def diversity_by_scene_similarity(per_lane: list[dict], thresh: float = 0.34) -> dict:
+    """
+    Split cross-clip diversity by how SIMILAR the two scenes were.
+
+    `cross_clip_diversity` averages over all clip pairs, and in a set of 128 scenes almost
+    every pair is unrelated -- so a model that emits one stock sentence per scene FAMILY still
+    scores near 1.0. That is exactly what happened on job 443475: diversity read 0.931 while
+    four openings covered 46% of clips and four different engine scenes all produced variants
+    of "hold on tight, we're picking up speed".
+
+    Rather than hand-defining families (which begs the question), this buckets pairs by caption
+    word-overlap (Jaccard over content words) and reports transcript diversity in each bucket.
+    A healthy model looks the same in both. A model reciting per-family stock phrases shows a
+    clear drop in the SIMILAR bucket, and that drop is the number to watch.
+    """
+    from salm.a2s.wer import word_edit_distance
+    caps, texts = {}, []
+    for lane in per_lane:
+        caps.update(lane.get("__captions__", {}))
+        for sid, (wh, _) in ((k, v) for k, v in lane.items() if k != "__captions__"):
+            texts.append((sid, wh))
+    def stem(w: str) -> str:
+        """Crude suffix stripping. Ambient captions are full of morphological variants --
+        bird/birds, chirp/chirps/chirping, bark/barking -- and word-level Jaccard scores
+        those pairs as completely unrelated, which puts genuinely similar scenes in the
+        'different' bucket and hides exactly the collapse this function looks for."""
+        for suf in ("ing", "ers", "er", "es", "s"):
+            if len(w) > len(suf) + 2 and w.endswith(suf):
+                return w[: -len(suf)]
+        return w
+
+    words = {sid: {stem(w) for w in normalize_text(c).split() if w not in STOP}
+             for sid, c in caps.items()}
+    sim_d, dif_d = [], []
+    for (sa, a), (sb, b) in itertools.combinations(texts, 2):
+        if sa == sb:
+            continue
+        wa, wb = words.get(sa, set()), words.get(sb, set())
+        if not wa or not wb:
+            continue
+        j = len(wa & wb) / len(wa | wb)
+        d = word_edit_distance(a, b) / max(len(a), len(b), 1)
+        (sim_d if j >= thresh else dif_d).append(d)
+    out = {"threshold": thresh, "n_similar_pairs": len(sim_d), "n_different_pairs": len(dif_d)}
+    out["diversity_similar_scenes"] = st.mean(sim_d) if sim_d else float("nan")
+    out["diversity_different_scenes"] = st.mean(dif_d) if dif_d else float("nan")
+    out["family_collapse_gap"] = (out["diversity_different_scenes"]
+                                  - out["diversity_similar_scenes"]) if sim_d and dif_d else float("nan")
+    return out
+
+
+def opening_concentration(per_lane: list[dict], n_words: int = 4, top: int = 4) -> dict:
+    """
+    What fraction of clips share one of the `top` most common openings?
+
+    The defect in its most direct form. On job 443475's greedy lane, four 4-word openings
+    covered 46% of 128 clips and "hey can you hear" alone accounted for 39 -- a model with a
+    small stock of safe entry phrases. Deterministic decoding causes this by construction:
+    argmax takes the single most likely continuation, and at position 0 with no context that
+    is simply the most frequent opening in the training data.
+
+    A varied model should sit low here. This is the number nucleus sampling has to move.
+    """
+    seen: dict[str, str] = {}
+    for lane in per_lane:
+        for sid, (wh, _) in ((k, v) for k, v in lane.items() if k != "__captions__"):
+            if len(wh) >= n_words:
+                seen.setdefault(sid, " ".join(wh[:n_words]))
+    if not seen:
+        return {"opening_top4_share": float("nan"), "opening_most_common": "", "n_clips": 0}
+    c = Counter(seen.values()).most_common(top)
+    return {
+        "opening_top4_share": sum(v for _, v in c) / len(seen),
+        "opening_most_common": c[0][0] if c else "",
+        "opening_most_common_count": c[0][1] if c else 0,
+        "n_clips": len(seen),
+    }
 
 
 def horizon(curve: dict[int, float]) -> int:
@@ -209,6 +296,8 @@ def main() -> int:
             "horizon_cross_seed": None if det else horizon(cs),
             "horizon_inter_asr": horizon(ia),
             "cross_clip_diversity": cross_clip_diversity(lanes),
+            **diversity_by_scene_similarity(lanes),
+            **opening_concentration(lanes),
         }
         log(f"  [{name}] {len(lanes)} lanes, {results[name]['n_clips']} clips")
 
@@ -231,6 +320,12 @@ def main() -> int:
         log(f"  {'':22s} {'inter-ASR':10s} {fmt(ia)}   {r['horizon_inter_asr']}")
         log(f"  {'':22s} cross-clip diversity {r['cross_clip_diversity']:.3f}  "
             f"(1.0 = every clip its own utterance; near 0 = collapsed to one sentence)")
+        log(f"  {'':22s}   by scene: similar {r['diversity_similar_scenes']:.3f} "
+            f"({r['n_similar_pairs']} pairs) | different {r['diversity_different_scenes']:.3f} "
+            f"({r['n_different_pairs']} pairs) | COLLAPSE GAP {r['family_collapse_gap']:+.3f}")
+        log(f"  {'':22s}   top-4 openings cover {r['opening_top4_share']:.0%} of "
+            f"{r['n_clips']} clips | most common x{r['opening_most_common_count']}: "
+            f"\"{r['opening_most_common']}\"")
         log("")
 
     if args.out:

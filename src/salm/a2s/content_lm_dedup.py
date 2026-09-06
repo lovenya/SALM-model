@@ -143,6 +143,7 @@ class ContentLMDedup(nn.Module):
         temperature: float = 1.0,
         dur_temperature: float | None = None,
         top_k: int = 0,
+        top_p: float = 0.0,
         cfg_scale: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> tuple[list[list[int]], list[list[int]]]:
@@ -209,6 +210,25 @@ class ContentLMDedup(nn.Module):
                 k = min(top_k, logits.shape[-1])
                 kth = logits.topk(k, dim=-1).values[:, -1:]
                 logits = logits.masked_fill(logits < kth, float("-inf"))
+            if 0.0 < top_p < 1.0:
+                # Nucleus: keep the smallest set of codes whose probability mass reaches
+                # top_p, drop the rest. The middle ground greedy and temperature do not
+                # cover -- greedy always takes the single most likely continuation, which is
+                # why 39 of 128 clips opened "hey can you hear" (job 443475), while lowering
+                # temperature rescales the WHOLE distribution and leaves the long tail
+                # reachable. top_p removes the tail without flattening the head.
+                srt, idx = logits.sort(dim=-1, descending=True)
+                cum = srt.softmax(dim=-1).cumsum(dim=-1)
+                # Shift so the token that CROSSES the threshold is itself kept; otherwise a
+                # distribution whose top code already exceeds top_p would have everything
+                # masked and multinomial would see all -inf.
+                drop = cum - srt.softmax(dim=-1) >= top_p
+                drop[:, 0] = False
+                # Map the sorted-order mask back to vocabulary order. Explicit zeros_like
+                # base: scattering into `drop` itself happens to work only because idx is a
+                # permutation, which is not obvious to a reader.
+                mask = torch.zeros_like(drop).scatter(1, idx, drop)
+                logits = logits.masked_fill(mask, float("-inf"))
             return torch.multinomial(logits.softmax(dim=-1), 1, generator=generator)
 
         for _ in range(self.max_tokens):

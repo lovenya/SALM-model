@@ -676,6 +676,13 @@ def main() -> int:
                 # frame-level checkpoint would silently generate unguided audio and be
                 # written up as "guidance did nothing", which is a wrong conclusion, not a
                 # missing feature.
+                if args.content_lm_top_k > 0 and 0.0 < args.content_lm_top_p < 1.0:
+                    raise SystemExit(
+                        f"--content-lm-top-k={args.content_lm_top_k} and "
+                        f"--content-lm-top-p={args.content_lm_top_p} are both set. They compose "
+                        f"(top-k applies first), which is almost never intended and makes the "
+                        f"lane label ambiguous. Pass one."
+                    )
                 if args.content_lm_cfg != 1.0 and not lm_is_dedup:
                     raise SystemExit(
                         f"--content-lm-cfg={args.content_lm_cfg} requires a dedup (run-length) "
@@ -927,6 +934,7 @@ def main() -> int:
                             temperature=args.content_lm_temperature,
                             dur_temperature=(args.content_lm_dur_temperature or None),
                             top_k=args.content_lm_top_k,
+                            top_p=args.content_lm_top_p,
                             cfg_scale=args.content_lm_cfg,
                             generator=lm_generator,
                         )
