@@ -1,0 +1,24 @@
+# Renderer fine-tune: TRAIN/TEST MATCHING on the content channel.
+#
+# THE MISMATCH. train_ldm.py feeds the U-Net continuous `ctc_head.encode()` features; every
+# generation path feeds it codebook CENTROIDS (`content_codebook.dequantize`). The renderer
+# has never seen quantized content. Measured on matched clips with PERFECT codes
+# (codebook_gate_20260902_0656): oracle 0.4231 -> quantized_k2048 0.4843. That +0.061 is the
+# quantization alone, and for scale the whole remaining gap between the best LM lane (0.3688)
+# and real speech (0.3146) is 0.054.
+#
+# Layers on top of content_concat.yaml; only the content channel differs.
+
+use_content_concat: true
+content_concat_channels: 8
+content_concat_mode: full
+content_dropout_prob: 0.1
+lr_content: 1.0e-4
+
+content_quantize_codebook: /scratch/l/lovenya/salm_model_outputs/content_codebook/codebook_k2048.pt
+content_corrupt_rate: 0.0
+content_corrupt_neighbours: 8
+
+ctc_checkpoint: /scratch/l/lovenya/salm_model_outputs/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt
+epochs: 60
+lr_total_steps: 4080

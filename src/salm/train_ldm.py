@@ -225,6 +225,19 @@ class TrainConfig:
     content_concat_mode: str = "broadcast"   # or "full"
     lr_content: float = 1.0e-4               # IP-Adapter's own adapter LR, not lr_unet's 1e-5
     content_dropout_prob: float = 0.1        # per-row dropout to zero content; enables content CFG
+    # ---- TRAIN/TEST MATCHING FOR THE CONTENT CHANNEL
+    # The renderer is trained on CONTINUOUS ctc_head.encode() features but generation feeds it
+    # codebook CENTROIDS (generate.py: content_codebook.dequantize). It has never seen
+    # quantized content. Measured cost of that mismatch, matched clips and PERFECT codes
+    # (job codebook_gate_20260902_0656): oracle 0.4231 -> quantized_k2048 0.4843, i.e. +0.061
+    # inter_asr_dist for the quantization alone. For scale, the whole remaining gap between the
+    # best LM lane (0.3688) and real speech (0.3146) is 0.054.
+    content_quantize_codebook: str = ""      # path to codebook_kN.pt; "" keeps continuous
+    # Nearest-neighbour substitution rate on top of quantization. Calibrate to the LM's
+    # MEASURED error rate -- see salm/a2s/code_corruption.py for why substitution must be
+    # nearest-neighbour and not uniform random.
+    content_corrupt_rate: float = 0.0
+    content_corrupt_neighbours: int = 8
 
     # PHASE 2 of end-to-end sequential conditioning (2026-09-01). Job 434308 trained the
     # renderer (unet + content_projector) and the scene-understanding head SIMULTANEOUSLY
@@ -643,6 +656,7 @@ def main() -> int:
     # head. Loaded here, not at import time, so every run without lambda_ctc pays zero cost
     # -- no extra weights in memory, no extra startup time.
     vae = ctc_head = None
+    content_quantizer = content_neighbours = None
     if cfg.lambda_ctc > 0.0:
         # O-F is wired only into the O2 training branch (it needs the x0_hat/timesteps
         # extras that branch already requests), and it is designed as additive to O2, not a
@@ -791,6 +805,32 @@ def main() -> int:
             n_freq=int(train_ds.latent_shape[-1]),
             mode=cfg.content_concat_mode,
         ).to(device)
+
+        if cfg.content_quantize_codebook:
+            # Close the train/test gap on the content channel. Verified against the codebook,
+            # not assumed: a width mismatch here would silently feed the U-Net centroids from
+            # a different feature space and every metric would still look plausible.
+            from salm.a2s.code_corruption import neighbour_table
+            from salm.a2s.content_codebook import ContentCodebook
+
+            cb_payload = torch.load(cfg.content_quantize_codebook, map_location="cpu",
+                                    weights_only=False)
+            cb_codes = cb_payload["codes"]
+            if int(cb_codes.shape[1]) != int(ctc_head.encoder_dim):
+                raise SystemExit(
+                    f"codebook width {cb_codes.shape[1]} != CTC encoder_dim "
+                    f"{ctc_head.encoder_dim}; {cfg.content_quantize_codebook} was fitted on "
+                    f"different features"
+                )
+            content_quantizer = ContentCodebook(
+                int(cb_codes.shape[0]), int(cb_codes.shape[1])
+            ).to(device)
+            content_quantizer.codes.copy_(cb_codes.to(device))
+            content_neighbours = neighbour_table(
+                cb_codes, k=cfg.content_corrupt_neighbours
+            ).to(device)
+            log(f"    content QUANTIZED through {cfg.content_quantize_codebook} "
+                f"(K={cb_codes.shape[0]}), corrupt_rate={cfg.content_corrupt_rate}")
 
         # NOTE: sequence_head itself is NOT built here -- it needs `conditioner`, which the
         # architecture registry builds further down (`build_arch`, after this whole
@@ -1137,6 +1177,15 @@ def main() -> int:
                 # detectable here at epoch 3 from a validation pass instead of after a
                 # whole generation job and a listening session.
                 content_seq = torch.roll(content_seq, shifts=content_roll, dims=1)
+            if content_quantizer is not None:
+                # Match generation exactly: quantize to codebook indices and take the
+                # centroid back. Applied to TRAIN and VAL alike -- a val pass on continuous
+                # content would report a number the deployed path never achieves.
+                idx = content_quantizer.indices(content_seq.float())
+                if train and cfg.content_corrupt_rate > 0.0:
+                    from salm.a2s.code_corruption import corrupt_codes
+                    idx = corrupt_codes(idx, content_neighbours, cfg.content_corrupt_rate)
+                content_seq = content_quantizer.dequantize(idx).to(content_seq.dtype)
             keep = None
             if train and cfg.content_dropout_prob > 0.0:
                 # Independent per-row dropout to a ZERO content map, following IP-Adapter's
