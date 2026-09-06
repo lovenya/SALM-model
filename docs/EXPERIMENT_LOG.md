@@ -2600,3 +2600,62 @@ helpful". Real inefficiency, but it targets the end of the utterance while the b
 - Job 443475 generates 128 per codebook and transcribes all of them, because 16 clips cannot
   distinguish a good model from a kind sample.
 - CFG stays available at w≈1.5 but is not the main line.
+
+---
+
+## 2026-09-06 — Plan vector: null, and the reason is more useful than the result
+
+**Job 443751.** Three arms, K=2048, seed 0, 100 epochs: no-plan control, λ_plan=1.0, λ_plan=0.3.
+Matched by construction — `plan_proj` zero-initialised and the plan modules built after the
+positional embeddings, so a `use_plan=True` model is bit-identical to its twin at init (max
+logit difference 0.00e+00, verified before submission).
+
+### The result
+
+| arm | best val_loss | scene_gap | plan BCE start → best | cross-seed horizon |
+|---|---|---|---|---|
+| no-plan | 2.4928 @ep9 | +0.0324 | — | **1** |
+| λ=1.0 | 2.4948 @ep9 | +0.0300 | 0.5027 → 0.2033 | **0** |
+| λ=0.3 | 2.4953 @ep9 | +0.0307 | 0.5352 → 0.2038 | **1** |
+
+Horizon unchanged. Clarity unchanged. val_loss unchanged to 0.002. By the pre-registered
+criteria this is FAILURE: "horizon unchanged... a global commitment is not what is missing."
+
+### Why that verdict is too broad, and what actually happened
+
+The plan loss was not flat, so the pre-registered no-op check passed and the arm looked like a
+real test. It was not. Measuring the plan head against baselines that use **no scene
+information at all**:
+
+```
+bag-of-codes target density              0.0586  (120 of 2048 codes per utterance)
+BCE, predict 0.5 everywhere (init)       0.6931
+BCE, predict the global density          0.2231
+BCE, predict per-code marginal (NO scene) 0.2073   <- the real bar
+BCE the plan head reached                 0.2033
+```
+
+**The plan head beat a scene-blind marginal by 0.0040 nats.** Almost everything it learned was
+"which codes are common in this corpus", not "which codes this scene calls for". The model was
+asked to commit to something carrying essentially no scene-specific information, so a null
+horizon says nothing about whether commitment helps. **This was a target-choice failure, and
+the target was the agent's.**
+
+The pre-registered no-op check was necessary but not sufficient: it asked whether the auxiliary
+loss moved, not whether it moved *past a baseline that ignores the conditioning input*. Any
+future auxiliary head needs the second check, and it is cheap — see LEARNINGS.
+
+### The finding worth keeping
+
+0.0040 nats is a direct measurement of how much the ambient determines the utterance's code
+inventory: **almost nothing**. That is consistent with job 442799's f1 0.16 exact-word ceiling
+from a ground-truth caption, and it sharpens the codebook question rather than settling it —
+either the scene genuinely under-determines content, or the code inventory is the wrong thing
+to ask about an utterance. Those need separating before another plan-shaped idea is built.
+
+### What it changes
+
+- The plan-vector direction is closed in this form. Not "commitment does not help" — untested.
+- Job 443989 (latent think tokens) is the follow-up, deliberately shaped to impose **no target**
+  so it cannot inherit the same failure.
+- Any auxiliary-loss head from here states its scene-blind baseline before the run, not after.
