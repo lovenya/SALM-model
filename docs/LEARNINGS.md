@@ -353,3 +353,62 @@ used for *selection* must first be validated against the overfitting axis, not m
 intuition about what it measures. A quantity that improves while held-out loss doubles is
 measuring something the model gains by memorising. It may still be diagnostically useful. It
 must never be the thing you optimise or select on.
+
+---
+
+## An auxiliary head must be scored against a baseline that ignores the conditioning input
+
+*2026-09-06, job 443751*
+
+**The principle:** when you add an auxiliary loss to force a model to learn something, "the
+loss went down" does not mean it learned that something. Losses fall for free — on the marginal
+statistics of the target, which are available without looking at the input at all. Unless you
+state the input-blind baseline **before** the run, a head that learned nothing useful is
+indistinguishable from one that worked, and the experiment built on top of it becomes
+uninterpretable while looking healthy.
+
+A conditional generator kept losing the thread partway through each output. The fix under test
+was a *plan*: predict, from the conditioning input, a summary of the whole target (here, a
+multi-hot bag of which discrete codes the utterance would contain), then bias every decoding
+step with it. The design anticipated the obvious failure and guarded it — the trainer logged
+the auxiliary loss every epoch, and the job flagged an arm whose loss stayed flat as "a no-op
+wearing the label of an experiment".
+
+The loss did not stay flat. It fell from 0.5027 to 0.2033, and the arm passed the guard. The
+downstream metric did not move, and the natural write-up was "committing to a plan does not
+help."
+
+That write-up would have been wrong. Checking afterwards against predictors that never see the
+conditioning input:
+
+```
+predict 0.5 everywhere (initialisation)      0.6931
+predict the global target density            0.2231
+predict the per-class marginal (INPUT-BLIND)  0.2073   <- the real bar
+what the auxiliary head achieved              0.2033
+```
+
+The head beat an input-blind marginal by **0.0040 nats**. Essentially everything it learned was
+the corpus-level frequency of each class. The model was asked to commit to a summary that
+carried almost no input-specific information — and a plan that says nothing cannot be held onto.
+The experiment never tested its hypothesis.
+
+**Why the guard missed it.** "Did the loss move?" and "did the loss move *past what you get for
+free*?" are different questions, and only the second is evidence. The first is satisfied by any
+head that discovers the target's marginal distribution, which every head does within a few
+epochs. On a sparse multi-label target the gap between those two questions is enormous: the
+initialisation loss (0.69) is three times the input-blind baseline (0.21), so a head can appear
+to have learned a great deal — a 60% reduction — while contributing nothing.
+
+**What to do instead.** Compute the input-blind baseline from the training targets before the
+run and put the number in the experiment's pre-registration next to the success criterion. It
+costs one pass over the labels. Then a result reads as "beat the blind baseline by X", where X
+is the only quantity that was ever evidence. If X is near zero, the auxiliary head is the
+finding — not whatever the downstream metric did.
+
+**The generalisation.** This is the auxiliary-loss form of a broader trap: a number that
+improves for a reason unrelated to the mechanism under test. It is the same failure as a
+conditioning-gap metric that rises with overfitting, or an intelligibility score that rewards
+saying something clearly over saying the right thing. In each case the defence is identical and
+cheap — before trusting a metric as evidence for a mechanism, construct the strongest thing
+that could move it *without* that mechanism, and measure that too.
