@@ -264,3 +264,92 @@ plot it against the overfitting axis. If it improves monotonically while val los
 is measuring something the model gains by memorising, and the direction it points is only
 trustworthy at a fixed point on that axis. This is cheap to check — the numbers were already
 sitting in `history.json` — and it should be checked once per metric, not once per project.
+
+---
+
+## An argument about continuous means does not transfer to discrete tokens
+
+*2026-09-06, jobs 443379 / 443475*
+
+**The principle:** when a project is built around avoiding a specific failure mode, check that
+the argument still applies after you change representation. Inherited reasoning is invisible —
+it lives in a comment nobody re-reads, and it keeps steering decisions long after its premise
+has gone.
+
+A speech-generation system failed at regression for a well-understood reason:
+
+    argmin_f E[(f(x) − y)²]  =  f(x) = E[y | x]
+
+A squared-error model returns the conditional mean, and for symbolic targets the mean of
+several plausible outputs is not a plausible output — the average of five sentences is not a
+sentence. That diagnosis was correct and it motivated a move to discrete codes with
+autoregressive sampling, which was the right move.
+
+It also left this comment in the sampler, and the comment then governed every generation the
+project produced for weeks:
+
+> Sampling, never argmax: argmax walks straight back into the conditional mean that the
+> discrete formulation exists to escape.
+
+**That is false, and the falseness is the whole lesson.** Argmax over a categorical
+distribution returns the most likely *sequence* — a real utterance, a member of the output
+space. The conditional mean of a distribution over discrete tokens is not what argmax computes
+and is not reachable by it; a mean requires a metric space, and category labels have none. The
+argument was carried across the boundary between continuous and discrete outputs, where its
+premise stops holding, and nobody re-derived it because it had been right once.
+
+Measured cost of the mistake: switching to greedy decoding moved the project's intelligibility
+metric from 0.452 to 0.369 on a scale where real speech is 0.315 and the autoencoder's own
+round-trip ceiling is 0.372. One flag, no retraining, no new data — the single largest
+improvement in the project's history, sitting behind a comment.
+
+**How this gets caught earlier.** A comment that justifies a *decision* by citing a *theorem*
+should name the theorem's assumptions, so that changing representation makes the mismatch
+visible. "Never argmax" is unfalsifiable folklore. "Never argmax **because squared error
+returns E[y|x] and the mean of plausible mel trajectories is off-manifold**" carries its own
+expiry date: the moment the loss is cross-entropy over categories, the stated reason plainly no
+longer applies and the decision is up for review. Write the *because* into the code, not just
+the rule.
+
+**The generalisation.** Inherited constraints deserve periodic re-derivation, especially the
+ones that feel settled. The dangerous ones are not the decisions still being argued about —
+those get revisited. They are the ones that were correct in their original context, were
+recorded as rules rather than as arguments, and survived the change that invalidated them.
+
+---
+
+## A checkpoint selector inherits every pathology of its selection metric
+
+*2026-09-06, from the dedup content-LM runs*
+
+**The principle:** `checkpoint_best.pt` is only "best" with respect to whatever you chose to
+maximise. If that metric has a failure mode, the selector silently converts it into a shipped
+artifact, and the filename then hides the problem behind a word that sounds like a verdict.
+
+Three runs saved `checkpoint_best` on highest `val_scene_gap` — an ablation gap measuring how
+much the model relies on its conditioning input. Separately, that metric turned out to rise
+**monotonically with overfitting** (it grows as the conditioning input becomes a sharper
+retrieval key into memorised training examples). The consequence:
+
+| run | `best_loss` | val_loss | `best` | val_loss |
+|---|---|---|---|---|
+| k512 | ep9 | 2.37 | ep87 | **5.01** |
+| k1024 | ep10 | 2.42 | ep91 | **4.93** |
+| k2048 | ep9 | 2.49 | ep85 | **4.95** |
+
+`checkpoint_best` was, by construction, close to the most overfit checkpoint of each run —
+val_loss more than double the optimum — because it was selected by a criterion that rewards
+memorisation. Under a stochastic decoder the two tags scored alike, so the problem stayed
+hidden; under a deterministic one the honest checkpoint won by a wide, consistent margin.
+
+**What to do instead.** Save on the metric you will defend in writing, and name files after the
+criterion rather than after a judgement: `checkpoint_minval.pt`, `checkpoint_maxgap.pt`. A
+reader then cannot mistake a selection rule for a conclusion. Where a secondary metric is worth
+tracking, track it — but do not let it name a file `best`, because six weeks later "we used the
+best checkpoint" is what gets written in the paper.
+
+**The deeper point, and the reason this pairs with the entry above on scene_gap:** any metric
+used for *selection* must first be validated against the overfitting axis, not merely against
+intuition about what it measures. A quantity that improves while held-out loss doubles is
+measuring something the model gains by memorising. It may still be diagnostically useful. It
+must never be the thing you optimise or select on.

@@ -72,7 +72,7 @@ fakes this with filler-token padding; we have it exactly.
 and `val_x0_rel_mse` 0.2884 (best ever). Binding confirmed; **intelligibility not yet
 measured.**
 
-### D2. Content classifier-free guidance -- NOT YET DONE, cheap, high expected value
+### D2. Content classifier-free guidance -- DONE 2026-09-06 (job 442847), PARTIAL, not the main line
 
 We have never generated A2S audio with content guidance. The content channel had no null
 branch and no separate scale, while the pooled channel the oracle test discredited is
@@ -80,10 +80,19 @@ amplified 3x. VoiceLDM uses **dual CFG** with independent `w_desc` and `w_cont`,
 that raising `w_cont` is precisely what buys intelligibility (at the cost of description
 adherence). InstructPix2Pix is the same two-condition shape and solves it identically.
 
-`content_dropout_prob=0.1` now creates the null during training; the **sampler still needs the
-dual-CFG term** and a `w_cont` sweep. Also unswept: plain `guidance_scale` for A2S at all --
-measured `val_d2_gap` of 0.0086-0.018 means CFG at 3.0 moves the trajectory only ~3.6% off
-unconditional. S2A swept this and shipped at 7.5.
+**RESULT (job 442847).** Implemented on the content LM's code head rather than the diffusion
+sampler, with the unconditional branch a rolled batch (a different scene's memory) rather than
+a zeroed one, since a zeroed memory is out of distribution. Swept w in {1.0, 1.5, 2.5, 4.0}.
+
+w=1.5 roughly doubles scene control at the first two words (cross-seed agreement 0.11 -> 0.27
+and 0.04 -> 0.21) with clarity intact. w >= 2.5 destroys the audio, buying determinism by
+pushing codes off-manifold (inter-ASR 0.46 / 0.15 / 0.06 by the third word). So: a real but
+small effect with a hard ceiling on w, kept available and not pursued further.
+
+**The control was worth more than the treatment.** A greedy lane included only to calibrate the
+cross-seed scale showed that with content codes FIXED, the renderer reproduces the same words at
+0.96 / 1.00 / 0.93 for the first three positions. The renderer is not the bottleneck;
+essentially all output variance is the LM's sampling. That observation led directly to D8.
 
 ### D3. A better content representation
 
@@ -233,6 +242,36 @@ deprioritized (user call, 2026-09-02).
 ---
 
 ---
+
+### D8. Deterministic decoding -- ACTIVE, the current best result
+
+Greedy (`top_k=1`) over the discrete content codes, replacing temperature sampling. Free: one
+flag, no retraining.
+
+**Why it was not tried for weeks.** `ContentLM.sample` carried "Sampling, never argmax: argmax
+walks straight back into the conditional mean that the discrete formulation exists to escape."
+That is an argument about CONTINUOUS targets -- where `argmin E[(f(x)-y)^2] = E[y|x]` and the
+mean of plausible mel trajectories is off-manifold -- imported into discrete token space, where
+argmax returns the most likely SEQUENCE, a real utterance rather than an average. Written up in
+LEARNINGS as the general lesson about inherited constraints.
+
+**RESULT (jobs 443379, 443475).** With `checkpoint_best_loss` (epoch 9) and K=2048, over 128
+val clips: `inter_asr_dist` 0.3688 against real speech 0.3146 and the VAE round-trip ceiling
+0.3722. 48% of clips at or below that ceiling, 35% at or below real speech, 7% clearly
+degraded, none near the noise floor. Previous project best was 0.452. Listening (Lovenya):
+"the best loss ones... they are super better".
+
+**The cost, found by reading the transcripts rather than the metrics.** Four stock openings
+cover 46% of 128 clips ("hey can you hear ..." alone is 39). The perfect-agreement clips are
+disproportionately the ones where the model reached for a safe phrase -- four different engine
+scenes all produced variants of "hold on tight, we're picking up speed". Failure correlates
+with utterance length (r = +0.37): it breaks down when it attempts something beyond its stock
+inventory. `cross_clip_diversity` scored 0.931 and missed this entirely, because it averages
+over all pairs and most pairs are unrelated scenes -- the collapse is per scene FAMILY, and the
+metric is too coarse to see it. A per-scene-family diversity measure is the open gap.
+
+**Also required with it:** `checkpoint_best_loss`, not `checkpoint_best`. See LEARNINGS on
+selection metrics -- `best` is chosen on `val_scene_gap`, which rises with overfitting.
 
 ## Considered and rejected
 

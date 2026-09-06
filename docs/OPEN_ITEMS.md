@@ -29,11 +29,11 @@ we chose against it.
 
 ## Decisions needed (added 2026-09-03)
 
-- **[DISCUSS] Which K to carry forward.** The metric and the ear disagree. `inter_asr_dist`
-  ranks K=2048 best for generation (0.4438) while `val_scene_gap` and `val_loss` both favour
-  K=512, and the listening test called 512/1024/2048 all acceptable with 256 muffled. K=512 is
-  a quarter of 2048's vocabulary to learn from 17,596 utterances, which matters because
-  prediction — not reconstruction — is the binding constraint. Not decided.
+- ~~**[DONE] Which K to carry forward.**~~ **K=2048**, at `checkpoint_best_loss`, decoded
+  greedily. Over 128 val clips: `inter_asr_dist` 0.3688 (k1024 0.3734, k512 0.5268) against a
+  VAE round-trip ceiling of 0.3722. The metric and the ear now agree, which they did not when
+  this item was written. Jobs 443379 / 443475, log entry 2026-09-06.
+
 
 - **[DISCUSS] Contrastive / negative-scene conditioning.** Raised by Lovenya as a VICReg-style
   idea; refined to a term that turns `val_scene_gap` from a diagnostic into a training
@@ -41,12 +41,13 @@ we chose against it.
   +0.021 invariance suggests the ceiling may be in the data rather than the objective, so this
   should follow the dedup result rather than precede it. Not implemented — no code exists.
 
-- **[DISCUSS] Transcript coherence needs its own metric.** `inter_asr_dist` measures whether
-  words are present and clear, not whether they form sentences, and it demonstrably rewards
-  clarity over correctness (LM lanes scored *better* than their own oracle ceiling). The
-  observed failure — "3-4 words make sense then another group starts" — has no number attached
-  to it. Candidate: perplexity of the transcript under a language model. Would be a new
-  experiment; not started.
+- ~~**[DONE] Transcript coherence needs its own metric.**~~ Three were built and none of them
+  measured coherence: `cross-seed agreement` (job 442814) measures determinism, which a
+  one-to-many task should not have; `longest_span`/`ref_wer` (442814) are bounded at f1 0.16
+  even from a ground-truth caption; `positional inter-ASR` (442847) indexes by word position, so
+  a garbage middle that ASR skips entirely leaves the curve looking healthy. **What finally
+  localised the failure was reading 128 transcripts** (443475), which is also how the
+  stock-phrase collapse was found. Log entry 2026-09-06. Superseded by the two items below.
 
 ## Deliberately chosen against, 2026-09-03 (so we stop re-proposing these)
 
@@ -766,3 +767,49 @@ was not enough on its own, so two structural changes:
 **Also fixed:** the probe's summary re-derived its output stamp with a fresh `date` call, which
 printed a directory one minute off from the one actually created. Paths in a summary must be
 the variable that was used, never recomputed.
+
+
+---
+
+## Raised 2026-09-06 by the greedy result
+
+- **[DISCUSS] Per-scene-family diversity metric.** `cross_clip_diversity` (0.931) passed the
+  greedy lane, but reading the transcripts showed four stock openings covering 46% of 128 clips
+  and four different engine scenes all producing "hold on tight, we're picking up speed". The
+  metric averages over all pairs and most pairs are unrelated scenes, so within-family collapse
+  is diluted to invisibility. Needs grouping by scene family (the ambient caption clusters, or
+  the pooled CLAP embedding) and measuring diversity **within** each group. Until this exists,
+  no diversity claim about a deterministic decoder should be believed.
+
+- **[DISCUSS] The plan horizon is the binding constraint, and compression cannot fix it.**
+  Measured: the model holds ~20 run-length tokens of plan and one utterance needs ~56 — a 2.8x
+  shortfall. Compression shrinks both sides equally, so it does not change the ratio; that is
+  why run-length's 2.0x bought so little and why BPE alone would not either. The two honest
+  options are (a) a coarser unit that is 2.8x beyond frames, or (b) extending the horizon
+  itself — a global plan vector predicted once and conditioning every step, so the model is not
+  reconstructing its intent from local token context. **(b) has never been tried.**
+
+- **[IMPL] Rewrite the BPE gate's PASS criterion before running it.**
+  `run_tamia_a2s_content_bpe_gate.sbatch` requires "< 80 mean val tokens over 256 frames". Given
+  the measured ~20-token horizon that is four times too lenient — it would PASS on a result that
+  cannot help. The real bar is the SPEECH REGION (median 111 of 256 frames) under ~20-25 tokens.
+  The gate also has no expected-results block, which CLAUDE.md requires.
+
+- **[DISCUSS] Variable-length output.** Raised by Lovenya. Speech fills a median 111 of 256
+  frames (43%) of the fixed 10.24 s canvas and 98% of clips are shorter than it, so the LM
+  spends 57% of its planning budget on a tail that carries no words and is not silence (24
+  distinct codes, change rate 0.37 vs speech's 0.87). Truncating the target at the speech end
+  would cut the horizon from ~140 tokens to ~61. Real inefficiency — but the coherence break is
+  at word 4 of ~15, and this targets the other end of the utterance. Worth doing, not the fix.
+  Caveat: the renderer was trained with real tail codes, so padding the tail with a silence code
+  is a distribution shift for a frozen renderer and needs a control.
+
+- ~~**[DONE] Recover the deleted late checkpoints.**~~ Job 443555 retrains all three K keeping
+  ep19/39/59/79/99 + last, into `dedup_k*_full` so nothing overwrites the surviving `best_loss`
+  checkpoints. Requested by Lovenya for completeness and for supervisor questions. The agent
+  recommended the deletion that made this necessary.
+
+- **[IMPL] State the checkpoint tag with every number.** `checkpoint_best` is selected on
+  `val_scene_gap`, which rises with overfitting, so `best` is close to the most overfit
+  checkpoint of each run (val_loss 5.01 vs `best_loss`'s 2.37 for k512). Any historical result
+  quoting "best" needs its tag checked before it is reused or written up.
