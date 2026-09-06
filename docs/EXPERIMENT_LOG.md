@@ -2470,3 +2470,133 @@ absent from later positions rather than under-weighted, which rules out decode-t
 points at the training objective or the unit (BPE over content codes, written in
 `src/salm/a2s/content_bpe.py`, never run). Cross-seed rises while inter-ASR collapses →
 guidance is buying determinism by driving codes off-manifold; a ceiling on w, not a win.
+
+---
+
+## 2026-09-06 — Greedy decoding, and a checkpoint selector that was rewarding overfitting
+
+**Jobs 442847 (CFG sweep, 30 lanes) and 443379 (greedy + temperature sweep, 18 lanes).**
+Generation only; nothing retrained.
+
+### The question
+
+442814 had localised the failure to scene control rather than clarity or overfitting, so 442847
+asked whether amplifying the ambient's contribution at every decoding step would extend the
+four-word horizon. 443379 followed from a listening result that no metric had predicted.
+
+### 442847 — classifier-free guidance: works narrowly, and the control was worth more
+
+`log p = log p(mismatched scene) + w · [log p(true) − log p(mismatched)]`, unconditional branch
+a rolled batch (K=2048, `checkpoint_best`, six seeds per w).
+
+| group | cross-seed by position (1→6) | inter-ASR (1→6) |
+|---|---|---|
+| w=1.0 | 0.11 0.04 0.01 0.01 0.01 0.01 | 0.77 0.69 0.54 0.46 0.25 0.23 |
+| w=1.5 | **0.27 0.21** 0.03 0.05 0.01 0.02 | 0.73 0.60 0.40 0.38 0.33 0.28 |
+| w=2.5 | 0.27 0.03 0.00 0.03 0.00 0.01 | 0.46 0.15 0.06 0.04 0.02 0.04 |
+| w=4.0 | 0.25 0.11 0.01 0.02 0.00 0.00 | 0.25 0.11 0.05 0.00 0.00 0.00 |
+| **greedy (ceiling)** | **0.96 1.00 0.93 0.72 0.58 0.63** | 0.96 0.96 0.88 0.67 0.52 0.35 |
+
+Verdict against the pre-registered criteria: **partial success plus failure mode 2**. w=1.5
+roughly doubles scene control at the first two words with clarity intact; w≥2.5 buys
+determinism by driving codes off-manifold and destroys the audio.
+
+Two things this got wrong, recorded because both were pre-registered and both were bad:
+
+- **The stated validity check was ill-posed.** It required w=1.0 to reproduce 442814's
+  `0.20 0.20 0.17 0.12`. 442814 ran K=512 on 4 clips; this ran K=2048 on 8. Never comparable.
+  Within-job comparisons across w are matched and stand.
+- **The greedy control, included only as a calibration ceiling, was the actual result.** With
+  content codes fixed, the renderer reproduces the same words at 0.96/1.00/0.93. **The renderer
+  is not the bottleneck**; essentially all output variance is the LM's sampling.
+
+### 443379 — greedy decoding: the best result the project has recorded
+
+18 lanes: greedy (`top_k=1`) at both checkpoints × 3 K, plus a 0.3/0.5/0.7/1.0 ladder × 3 K.
+
+| lane | inter_asr_dist | real_word_rate |
+|---|---|---|
+| **control: real speech** | 0.315 | 0.984 |
+| **control: VAE round-trip (ceiling)** | 0.372 | 0.977 |
+| **k2048 best_loss greedy** | **0.338** | **0.971** |
+| k1024 best_loss greedy | 0.387 | 0.953 |
+| k2048 best greedy | 0.477 | 0.909 |
+| k2048 best t1.0 (previous best lane) | 0.452 | 0.945 |
+| k512 best greedy | 0.651 | 0.892 |
+
+`k2048 best_loss greedy` sits **past the VAE round-trip ceiling** and near real speech, against
+a previous project best of 0.452. Cross-clip diversity 0.90–0.97 across every greedy lane
+(sampled lanes measure 0.950–0.969), so the pre-registered mode-collapse veto did **not** fire:
+greedy gives each scene its own utterance rather than one sentence per scene type.
+
+The temperature ladder is flat and uninformative by comparison (k2048: 0.484 / 0.445 / 0.471 /
+0.452 at 0.3 / 0.5 / 0.7 / 1.0). The gain is from argmax, not from sharpening.
+
+**Listening, 2026-09-06, user:** "the best loss ones... they are super better", with the
+qualification "its not always coherent.. sometimes some seconds are not that intelligible".
+Earlier the same day, on the `best`-checkpoint greedy lanes: "first 4-5 words are intelligible,
+makes sense.. but then 2-3 seconds of nothing or super unintelligible speech - and then maybe
+2-3 more words of coherence."
+
+### The checkpoint selector was rewarding overfitting
+
+Resolving the tags against `history.json`:
+
+| run | best_loss | val_loss | best | val_loss |
+|---|---|---|---|---|
+| dedup_k512 | ep9 | 2.3684 | ep87 | 5.0052 |
+| dedup_k1024 | ep10 | 2.4177 | ep91 | 4.9337 |
+| dedup_k2048 | ep9 | 2.4927 | ep85 | 4.9461 |
+
+`checkpoint_best` is selected on `val_scene_gap` — the metric shown three entries above to rise
+monotonically **with** overfitting. So `best` is, by construction, close to the most overfit
+checkpoint of the run. Under sampling the two tags scored alike, which is part of why the
+overfitting question looked closed; under greedy `best_loss` wins by 0.13–0.17 in all three
+codebooks. **Every result quoting `checkpoint_best` needs its tag stated, and new work should
+default to `best_loss`.**
+
+### Two acoustic explanations tested and killed (CPU analysis, no job)
+
+Against the user's "2-3 seconds of nothing or unintelligible", on the greedy audio they heard:
+
+- **Not silence.** Generated energy envelope matches the reference — 35% active vs 29%, longest
+  internal gap 0.5 s vs 0.6 s.
+- **Not noise.** Spectral flatness sits in the same range as real speech (0.02–0.14) with no
+  noisier middle.
+
+So the failed region is **acoustically convincing speech that is not words** — correct energy,
+correct spectral character, no lexical content. This is why every metric built for this project
+reports healthy audio while the ear does not: they all measure acoustics and the failure is
+lexical. It also exonerates the renderer a second time.
+
+### The plan horizon, in tokens
+
+Measured speech rate is 2.85 words/s (12.7 words in 4.45 s median), so "4–5 intelligible words"
+is 1.58 s = **39 content frames**:
+
+| representation | plan horizon | one full utterance | shortfall |
+|---|---|---|---|
+| frame-level | 39 tokens | 111 tokens | 2.8× |
+| run-length (2.0×) | 20 tokens | 56 tokens | 2.8× |
+
+**Compression does not change the ratio** — it shrinks both sides equally. That is the cleanest
+explanation yet for why run-length's 2× bought so little, and it sets a concrete bar for any
+coarser unit: 2.8× beyond frames, ~1.4× beyond run-length. It also means the existing BPE gate's
+PASS criterion (<80 tokens over 256 frames) is far too lenient — 80 tokens is four times the
+horizon.
+
+### Canvas occupancy
+
+Median speech is 4.45 s against a fixed 10.24 s canvas: **speech fills 111 of 256 frames (43%)**,
+and 98% of clips are shorter than the canvas. The tail is not silence (24 distinct codes, frame
+change rate 0.37 vs speech's 0.87), so the LM spends 57% of its planning budget predicting a
+region that carries no words. Raised by Lovenya as "would not fixing output to 10 seconds be
+helpful". Real inefficiency, but it targets the end of the utterance while the break is at word
+4 of ~15 — worth doing, not the fix.
+
+### What it changes
+
+- Greedy + `best_loss` is the new default for every A2S generation lane.
+- Job 443475 generates 128 per codebook and transcribes all of them, because 16 clips cannot
+  distinguish a good model from a kind sample.
+- CFG stays available at w≈1.5 but is not the main line.
