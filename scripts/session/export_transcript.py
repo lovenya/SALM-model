@@ -43,6 +43,8 @@ def render_user(prose: str) -> str | None:
     t = prose.strip()
     if t.startswith("This session is being continued from a previous conversation"):
         return None
+    if t.startswith("Base directory for this skill:"):
+        return None          # skill body injected by the harness, not typed by the human
     if any(tag in t for tag in ("<bash-input>", "<bash-stdout>", "<bash-stderr>")):
         cmds = re.findall(r"<bash-input>(.*?)</bash-input>", t, re.S)
         outs = re.findall(r"<bash-stdout>(.*?)</bash-stdout>", t, re.S)
@@ -109,6 +111,18 @@ def main() -> int:
             continue
         if rec.get("isSidechain"):
             continue                      # subagent chatter is not part of the conversation
+
+        att = rec.get("attachment") or {}
+        if att.get("type") == "queued_command" and (att.get("origin") or {}).get("kind") == "human":
+            # Sent mid-turn, while the assistant was still working. Stored outside the normal
+            # message stream, and frequently the turn that redirects everything -- dropping
+            # these silently was the exporter's worst bug.
+            txt = (att.get("prompt") or "").strip()
+            if txt:
+                n_user += 1
+                out += ["## 🧑 User *(sent mid-turn)*", "", txt, ""]
+            continue
+
         if rec.get("type") not in ("user", "assistant"):
             continue
         msg = rec.get("message") or {}
