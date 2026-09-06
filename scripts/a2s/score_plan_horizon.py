@@ -128,6 +128,33 @@ def curve_inter_asr(per_lane: list[dict]) -> dict[int, float]:
     return {p: st.mean(v) for p, v in sorted(pos.items()) if len(v) >= MIN_OBS}
 
 
+def cross_clip_diversity(per_lane: list[dict]) -> float:
+    """
+    Mean normalised word-edit distance between DIFFERENT clips' transcripts in the same lane.
+
+    The guard against greedy's specific failure. A deterministic decoder maximises coherence by
+    always choosing the most likely continuation -- and the most likely continuation given "a
+    vehicle engine" may be the same sentence for every vehicle clip in the set. That would
+    sound excellent one clip at a time and be worthless: a model that has learned one utterance
+    per scene TYPE, not one per scene.
+
+    1.0 means every clip got its own utterance. Near 0 means the lane collapsed to a single
+    sentence. Sampled lanes get this for free from their noise; greedy has to earn it, so this
+    number is not optional when reading a greedy lane.
+    """
+    from salm.a2s.wer import word_edit_distance
+    texts = []
+    for lane in per_lane:
+        for sid, (wh, _) in lane.items():
+            texts.append((sid, wh))
+    dists = []
+    for (sa, a), (sb, b) in itertools.combinations(texts, 2):
+        if sa == sb:
+            continue           # same clip across seeds is diversity we already measure
+        dists.append(word_edit_distance(a, b) / max(len(a), len(b), 1))
+    return st.mean(dists) if dists else float("nan")
+
+
 def horizon(curve: dict[int, float]) -> int:
     """Last position (1-indexed) at or above threshold, counting from the start unbroken."""
     n = 0
@@ -181,6 +208,7 @@ def main() -> int:
             "inter_asr": {str(k): v for k, v in ia.items()},
             "horizon_cross_seed": None if det else horizon(cs),
             "horizon_inter_asr": horizon(ia),
+            "cross_clip_diversity": cross_clip_diversity(lanes),
         }
         log(f"  [{name}] {len(lanes)} lanes, {results[name]['n_clips']} clips")
 
@@ -201,6 +229,8 @@ def main() -> int:
             log(f"  {name:22s} {'cross-seed':10s} {fmt(cs)}   {r['horizon_cross_seed']}")
         ia = {int(k): v for k, v in r["inter_asr"].items()}
         log(f"  {'':22s} {'inter-ASR':10s} {fmt(ia)}   {r['horizon_inter_asr']}")
+        log(f"  {'':22s} cross-clip diversity {r['cross_clip_diversity']:.3f}  "
+            f"(1.0 = every clip its own utterance; near 0 = collapsed to one sentence)")
         log("")
 
     if args.out:
