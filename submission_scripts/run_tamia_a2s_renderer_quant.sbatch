@@ -79,7 +79,10 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source /scratch/l/lovenya/SALM-model/submission_scripts/_salm_env.sh
 
-ARCH="${ARCH:-clapseq_xformer}"
+# The arch config FILENAME, not the short run-dir suffix. Job 443788 lost all three
+# arms in 84 seconds to "clapseq_xformer", which is the run-directory name, while the
+# file is a2s_audioldm_clapseq_xformer.yaml.
+ARCH="${ARCH:-a2s_audioldm_clapseq_xformer}"
 K="${K:-2048}"
 EPOCHS="${EPOCHS:-60}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
@@ -87,12 +90,16 @@ LR_TOTAL_STEPS="${LR_TOTAL_STEPS:-4080}"
 TRAIN_MINUTES="${TRAIN_MINUTES:-45}"
 NGEN="${NGEN:-64}"
 STAMP="$(TZ=America/Toronto date +%Y%m%d_%H%M)"
-RENDERER_CKPT="$RUNS_ROOT/a2s_audioldm_clapseq_xformer/content_concat_v4/checkpoints/checkpoint_best.pt"
+RUNS_SUBDIR="${RUNS_SUBDIR:-a2s_audioldm_clapseq_xformer}"
+RENDERER_CKPT="$RUNS_ROOT/$RUNS_SUBDIR/content_concat_v4/checkpoints/checkpoint_best.pt"
 CTC_CKPT="$OUTPUTS_ROOT/ctc_probe/ctc_probe_v1/checkpoints/checkpoint_best.pt"
 LM_CKPT="$OUTPUTS_ROOT/content_lm/dedup_k${K}/checkpoints/checkpoint_best_loss.pt"
 OUT_ROOT="$OUTPUTS_ROOT/generations/rquant_${STAMP}"
 
-for F in "$RENDERER_CKPT" "$CTC_CKPT" "$LM_CKPT" \
+for F in "configs/arch/${ARCH}.yaml" configs/exp/content_concat.yaml \
+         configs/exp/content_concat_quant.yaml \
+         configs/exp/content_concat_quantcorrupt.yaml \
+         "$RENDERER_CKPT" "$CTC_CKPT" "$LM_CKPT" \
          "$OUTPUTS_ROOT/content_codebook/codebook_k${K}.pt"; do
     [[ -f "$F" ]] || { echo "MISSING: $F" >&2; exit 1; }
 done
@@ -100,7 +107,7 @@ FREE=$(df -Pm /scratch/l/lovenya | awk 'NR==2{print $4}')
 echo "free space: ${FREE} MB (need >= 8000: 3 renderer runs plus wavs)"
 [[ "$FREE" -ge 8000 ]] || { echo "ABORT: only ${FREE} MB free" >&2; exit 1; }
 
-salm_print_header "RENDERER QUANT FINE-TUNE: 3 arms x $EPOCHS epochs from content_concat_v4"
+salm_print_header "RENDERER QUANT FINE-TUNE: 2 arms x $EPOCHS epochs from content_concat_v4"
 
 echo
 echo "==================== 1. GATE: are the LM's errors NEAR misses? ===================="
@@ -136,13 +143,20 @@ run_arm() {
 }
 run_arm continuous   content_concat               "$A_CONT"
 run_arm quantized    content_concat_quant         "$A_QUANT"
-run_arm quantcorrupt content_concat_quantcorrupt  "$A_CORR"
+# ARM C (nearest-neighbour corruption) DROPPED after job 443788's gate.
+# Measured: code "error rate" vs the reference is 0.9931 with only 2% near misses --
+# but that lane scores inter_asr_dist 0.3688, near real speech. Both cannot hold if
+# these were errors. They are not: the LM generates a DIFFERENT valid utterance, which
+# is correct for a one-to-many task. The renderer is never handed corrupted codes, so
+# there is nothing for corruption augmentation to simulate. Dropped on the measurement,
+# not retuned. The surviving question -- does the LM draw from a different code
+# DISTRIBUTION than training showed -- is now reported by step 1.
 
 echo
 echo "==================== 3. BIND GAP -- did the content channel survive? ===================="
 # Read before any audio number. A renderer that stopped using content would post a BETTER
 # inter_asr_dist by generating generic clean speech, which would be a regression dressed as a win.
-python - "$RUNS_ROOT" "$A_CONT" "$A_QUANT" "$A_CORR" <<'PY' || true
+python - "$RUNS_ROOT" "$A_CONT" "$A_QUANT" <<'PY' || true
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1]) / "a2s_audioldm_clapseq_xformer"
@@ -160,9 +174,9 @@ PY
 
 echo
 echo "==================== 4. GENERATE (greedy, matched) ===================="
-for pair in "continuous:$A_CONT" "quantized:$A_QUANT" "quantcorrupt:$A_CORR"; do
+for pair in "continuous:$A_CONT" "quantized:$A_QUANT"; do
     label="${pair%%:*}"; run="${pair#*:}"
-    ck="$RUNS_ROOT/a2s_audioldm_clapseq_xformer/$run/checkpoints/checkpoint_best.pt"
+    ck="$RUNS_ROOT/$RUNS_SUBDIR/$run/checkpoints/checkpoint_best.pt"
     [[ -f "$ck" ]] || { echo "  skip (no checkpoint): $label" >&2; continue; }
     d="$OUT_ROOT/$label"; mkdir -p "$d"
     CUDA_VISIBLE_DEVICES=0 python -m salm.generate --mode a2s --direction a2s \

@@ -89,6 +89,36 @@ def main() -> int:
     nbrs = neighbour_table(pay["codes"], k=args.neighbours).numpy()
     r = measure_code_error_rate(pred, true[:n], nbrs)
 
+    # DISTRIBUTION SHIFT, which is the question that survives.
+    #
+    # A high frame-wise "error rate" against the reference means almost nothing here: the
+    # scene-to-utterance map is one-to-many (exact-word recovery tops out at f1 0.16 even from
+    # a ground-truth caption), so the LM producing a DIFFERENT valid utterance is correct
+    # behaviour, not error. The renderer is not being handed corrupted codes.
+    #
+    # What could still hurt it is the LM drawing from a different code DISTRIBUTION than
+    # training ever showed -- over-using frequent codes, never emitting rare ones. That is a
+    # real train/test shift and it is what these numbers measure.
+    K_ = int(pay["codes"].shape[0])
+    pc = np.bincount(pred.reshape(-1), minlength=K_).astype(float)
+    tc = np.bincount(true[:n].reshape(-1), minlength=K_).astype(float)
+    pp, tp = pc / pc.sum(), tc / tc.sum()
+    eps = 1e-12
+    kl = float((pp * np.log((pp + eps) / (tp + eps))).sum())
+    ent = lambda q: float(-(q[q > 0] * np.log(q[q > 0])).sum())
+    r.update({
+        "codes_used_lm": int((pc > 0).sum()), "codes_used_true": int((tc > 0).sum()),
+        "num_codes": K_,
+        "entropy_lm": ent(pp), "entropy_true": ent(tp),
+        "kl_lm_vs_true": kl,
+    })
+    print()
+    print(f"  DISTRIBUTION (the question that survives a one-to-many task)")
+    print(f"    codes used      LM {r['codes_used_lm']:5d} / {K_}   true {r['codes_used_true']:5d} / {K_}")
+    print(f"    entropy         LM {r['entropy_lm']:.3f}      true {r['entropy_true']:.3f} nats"
+          f"  -> effective vocab {np.exp(r['entropy_lm']):.0f} vs {np.exp(r['entropy_true']):.0f}")
+    print(f"    KL(LM || true)  {kl:.4f} nats  (0 = identical usage; >0.3 is a real shift)")
+
     print()
     print(f"  frames compared            {r['frames']}")
     print(f"  code error rate            {r['error_rate']:.4f}")
