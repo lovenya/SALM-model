@@ -125,6 +125,14 @@ sbatch submission_scripts/run_tamia_s2a_rung3_one_node.sbatch
 
 ## Status
 
-Early. The S2A training path is implemented and the first runs are in progress; A2S is
-planned. Internal design notes, data details, decisions, and open questions are in
-`CONTEXT.md`.
+Research in progress, both directions implemented.
+
+**S2A** (speech to ambient audio): training path implemented, runs completed.
+
+**A2S** (ambient scene to speech): generates scene-appropriate speech from a 10.24 s ambient
+recording alone. The rendering stage is settled — given the right content it articulates
+clean, intelligible speech. The open problem is content planning: coherence holds for the
+first few words and then drifts, because the ambient scene constrains the topic and opening
+of an utterance but not its later words.
+
+Internal design notes, data details, decisions, and open questions are in `CONTEXT.md`.

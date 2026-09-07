@@ -9,7 +9,160 @@ This file is the internal working doc for this repo. It is NOT the public
 README -- keep cluster paths, in-progress decisions, and open questions here.
 Update it via the `/update-docs` skill after every meaningful milestone.
 
-## Current status — 2026-08-30
+## A2S: the renderer is settled, the bottleneck is the content LM — 2026-09-07
+
+**The measurement that reframes the direction.** `val_scene_gap` accounts for **1.8–2.8%** of
+the content LM's validation loss (k512 +0.0414/1.5002, k1024 +0.0370/1.6213, k2048
++0.0322/1.7588). The other 97%+ is language modelling over code sequences learned from 17,596
+utterances. Four independent measurements agree without having been designed to:
+
+- exact-word recovery f1 **0.16** even from a ground-truth caption (job 442799)
+- the plan head beat a scene-blind marginal by **0.0040 nats** (443751)
+- cross-seed agreement collapses after **~4 words** (442814)
+- the scene accounts for **<3%** of the loss (above)
+
+The scene constrains the OPENING and the TOPIC, not word 7. Every conditioning intervention
+tried was attempting to extract information that is not present, which is why they all landed
+where they did.
+
+**Operating point (use these):**
+- renderer: `runs/a2s_audioldm_clapseq_xformer/rladder_20260906_1654/checkpoints/checkpoint_ep119.pt` — FROZEN
+- content LM: `content_lm/dedup_k2048/checkpoints/checkpoint_best_loss.pt` (epoch 9)
+- decoding: **greedy** (`--content-lm-top-k 1`)
+- measured: `inter_asr_dist` 0.3688 over 128 val clips (real speech 0.3146, VAE ceiling 0.3722)
+
+**`checkpoint_best` is misnamed and must not be used blindly.** It is selected on
+`val_scene_gap`, and that metric rises monotonically WITH overfitting (dedup_k512: +0.041 at
+ep9 → +0.133 at ep99). So `best` is close to the most overfit checkpoint of each run —
+val_loss 5.01 against `best_loss`'s 2.37. Under sampling the two scored alike; under greedy
+`best_loss` wins by 0.13–0.17 in all three codebooks. **State the tag with every number.**
+
+**Eliminated by matched, gated experiments (do not re-propose):**
+
+| tried | job | result |
+|---|---|---|
+| more training | 438059 | flat epoch ladder |
+| regularization/capacity, 7 configs | 438062 | scene_gap invariant, spread 0.0019 |
+| overfitting as the cause | 442814 | train == val, ruled out |
+| content CFG | 442847 | w=1.5 buys two words, w≥2.5 destroys the audio |
+| temperature ladder | 443379 | flat |
+| nucleus sampling | 443737 | clarity and variety are ONE axis, no free point |
+| plan vector (bag-of-codes) | 443751 | null — target carried 0.0040 nats over scene-blind |
+| latent think tokens | 443989 | null — horizon flat at 1 across n_think 0/8/32 |
+| renderer trained on quantized content | 443895 | **worse** (0.5903 vs 0.3223 control) |
+| CosyVoice token space | 444076 | **ours is more structured** (35.9% vs −10.7%) |
+| CTC "peakiness" (D3 pre-net premise) | — | false: every code used, mean run 68–80 ms |
+| speaker entanglement of codes | — | gender explains 0.6% of code entropy |
+
+**The renderer is solved and frozen.** It cannot change WHICH words are produced — only how
+they sound. With codes fixed it reproduces the same words at 0.96/1.00/0.93 (442847 greedy
+control), and Lovenya's A/B on 2026-09-06 confirmed it by ear: two lanes differing by 0.27
+`inter_asr_dist` were heard as "90/95% same", because both share the same LM and greedy codes
+and therefore say the same sentence. It generates the whole 10.24 s at once via latent
+diffusion (not autoregressive, not chunked) — and the oracle lane proves that design renders
+coherent speech when the codes are right, so all-at-once is not the bottleneck.
+
+**METRICS HAVE DISAGREED WITH THE EAR TWICE.** `inter_asr_dist` measures ASR *agreement*, i.e.
+machine transcribability. When both lanes sit below human intelligibility, large differences in
+it are inaudible. Rank renderer variants BY EAR; the numbers place lanes on a scale and no more.
+
+**The plan-horizon arithmetic (corrected 2026-09-07).** The model holds ~20 run-length tokens
+of plan. The full sequence it must generate is **151.4 tokens** (measured, k2048 dedup cache),
+not the 56 first claimed — 56 was the speech region only (111 of 256 frames), but the model
+must also emit the silent tail. **The shortfall is 7.6×, not 2.8×.** Compression cannot close
+it (it shrinks both sides equally), which is why run-length's 2.0× bought so little.
+
+**No unpaired speech exists.** `datasets/` holds only TTAS (22,793 clips, 17,596 already train).
+Pretraining the content LM on speech-only data — which needs no ambient — is a download
+decision, not an engineering one.
+
+## MiDasheng memorization job prepared — 2026-09-07
+
+- Calibration jobs 444459 and 444434 both completed; distinct output directories, no
+  overwrite. Treat 444459 as canonical and 444434 as duplicate compute.
+- Corrected utilization: prior 59–88% figures were peaks. Whole-job sampled means
+  were 32–35%; batch32 median updates ~0.277s vs batch16 ~0.199s.
+- Next: [64-pair memorization plan](docs/MIDASHENG_MEMORIZATION_20260907.md),
+  A2S/joint batch32/64, 16 supervised blocks per pair, 2,000 optimizer updates.
+  Explicit 100-update warmup then cosine LR, logged per update. Same eligible
+  training subset across lanes; fixed-noise source-swap loss diagnostics added.
+- Prepared `submission_scripts/run_tamia_midasheng_memorize.sbatch`: one 4-H100 job,
+  aip-csubakan, 55-minute cap. Not submitted. Ten lightweight tests, metadata preflight
+  and Slurm test-only validation passed. No additional packages or downloads.
+- User prioritizes listenable outputs; accepts unmatched batch-size exposure for
+  exploration, with controlled reporting runs later if needed.
+
+## MiDasheng mapping pilot prepared — 2026-09-07
+
+- Gate job 444114 completed in 4:14. Reconstruction speech WER to original ASR was
+  0.0 on eight pairs; shuffled control about 1.0763. User listened and liked results.
+  This verifies a promising codec pairing, not A2S mapping. AudioLDM runs are a
+  separate collaborator's work; do not attribute them to this experiment.
+- Implemented source projector + Qwen rank-16 Q/V LoRA + stop-head adaptation through
+  a frozen differentiable MiDasheng flow head. Source-only A2S and alternating joint
+  A2S/S2A modes; no target text inputs. Encoder and waveform codec stay frozen.
+- [Pilot instructions and expected outcomes](docs/MIDASHENG_MAPPING_PILOT_20260907.md).
+  Four packed H100 lanes, microbatch16/32 for A2S and joint, 32 pairs, 40-step initial
+  calibration, 35-minute cap. User-run command: `sbatch submission_scripts/run_tamia_midasheng_mapping.sbatch`.
+  GPU training is not yet validated; no job submitted by the agent.
+- [Offline interactive architecture page](docs/midasheng_architecture.html) shows
+  training, inference, direction switches, causal history and trainable/frozen modules.
+- Seven lightweight tests, Python/Bash syntax and file-metadata preflights passed.
+  Every saved checkpoint gets generated controls and native retention examples.
+  Full-data streaming/resume and optional internal text are future gated work, not implemented.
+
+## Historical preparation: MiDasheng compatibility job — 2026-09-06
+
+- User downloaded generator snapshot `598b91a0abbdf15b5f979a0f8d8b0ef86533dbc1`,
+  encoder candidate `3969e451d1c62618089c1135fe4c58ed33af2457`, and Qwen tokenizer/config
+  `70d244cc86ccca08cf5af4e1e306ecf908b1ad5e`. Qwen special_tokens_map.json is not required.
+- [Setup, submission and expected results](docs/MIDASHENG_GATE_20260906.md): user-run
+  dedicated environment followed by `run_tamia_midasheng_gate.sbatch` (4 H100 / 25 minutes).
+  Four lanes compare FP32/batch4 with BF16/batch4/8/16. Eight fixed validation pairs;
+  native speech/sound, candidate round trips, shuffled-latent controls, independent ASR.
+- Metadata preflight passed (637 generator / 473 encoder-checkpoint tensors), four contract
+  tests passed, Bash syntax checked. No model inference, installs, downloads or submissions
+  performed by the agent. Environment imports and GPU execution remain unvalidated.
+- This is an oracle component/compatibility diagnostic, not A2S or joint training. Successful
+  reconstruction/native generation licenses the tiny jointly trained bidirectional pilot.
+  Existing AudioLDM work remains available; previous cascade diagnostics remain parked.
+
+## Independent review — 2026-09-06
+
+- Read the Codex export and research/user excerpts from all four top-level Claude transcripts;
+  excluded `pre_midturn_fix/`. Findings and evidence boundaries are in
+  [the independent audit](docs/A2S_INDEPENDENT_AUDIT_20260906.md).
+- Internal generated text is acceptable; text-free/shared-generator alternatives remain open.
+  The user runs all submissions, downloads, installs and long/heavy commands. Delete nothing.
+- **Latest user clarification:** audio/speech → internal text → speech/audio is acceptable
+  when integrated and jointly trained; an additional text-to-text model is unnecessary.
+  Explain gradient paths and total model size explicitly. AudioLDM is not closed, and the
+  dataset has not been shown too small for fine-tuning. See the
+  [joint-model design](docs/A2S_JOINT_MODEL_DESIGN_20260906.md).
+- Two diagnostic jobs are prepared but **parked, not GPU-validated or submitted**: a 96-scene pretrained
+  planner comparison (4 H100 / 35 minutes), and supplied-text rendering stress (4 H100 /
+  15 minutes). [Commands and expected artifacts](docs/A2S_REVIEW_JOBS_20260906.md).
+- Existing sampled planner rendering has 16.32% ASR WER to its supplied text (33/64 exact
+  transcripts); whole-utterance rendering is not established as solved. The first checks
+  separate planning quality from text-to-code-to-waveform fidelity.
+- Shared pretrained speech/sound generation is an independent branch, not yet a migration
+  decision. UNISON's released trainer needs source-conditioning adaptation; MiDashengLM-Gen
+  is an inference-only candidate with downloaded assets; joint training still needs implementation.
+- Six lightweight contract tests and shell/Python syntax checks cover the new harness;
+  actual GPU memory/throughput and generation APIs still require the first compute run.
+
+## Current status — 2026-09-02
+
+- **A2S renderer capability is established but conditional:** `content_concat_v3/v4`
+  generated intelligible fresh speech when given a dense CTC trajectory extracted from target
+  speech. This proves the AudioLDM rendering path can articulate speech; it does not solve
+  ambient-scene-to-content planning.
+- **Raw-audio scene planning works zero-shot, imperfectly.** Job 436247 completed 8/8 in 3:08.
+  Direct Thinker outputs cross-matched all four scenes. The scaffold correctly named baby/applause
+  but misheard motorcycle as chainsaw and water as frogs. Audio controls the planned semantic
+  output; direct planning was more reliable than forcing a written scene caption first.
+- Qwen is a candidate scene encoder/planner here, not the speech renderer or final model. The
+  unproven bridge is planned text/phonemes -> renderer-compatible dense content.
 
 - The user has listened to original speech, mel→vocoder reconstruction, and
   VAE→vocoder reconstruction and confirms all are intelligible. The existing AudioLDM
@@ -183,6 +336,18 @@ version rather than tracking latest.
 
 ## Decisions log
 
+- **2026-09-07**: A2S renderer **frozen** at `rladder_20260906_1654/checkpoint_ep119.pt`. The
+  150-epoch ladder was flat from ~ep39 (`inter_asr_dist` 0.3161–0.3180, a 0.002 spread) and
+  Lovenya preferred the 100+ rungs by ear. Further renderer training is not justified: a
+  renderer cannot change which words are produced.
+- **2026-09-07**: Generation defaults to **greedy** decoding and **`checkpoint_best_loss`**.
+  The "never argmax" rule this codebase followed was an argument about continuous means
+  imported into discrete token space; see `LEARNINGS.md`. Greedy moved the project metric from
+  0.452 to 0.3688 for one flag and no retraining.
+- **2026-09-07**: `content_concat_v3` deleted. Reconstructed first: v2/v3/v4 differ ONLY in
+  `epochs` and `lr_total_steps` — v3 is a re-run of v2 that reproduced it to four decimals,
+  and v4 is the same config trained twice as long. The design change was at v1 (frame-aligned
+  concatenation replacing cross-attention). Lineage recorded in `EXPERIMENT_LOG.md`.
 - **2026-08-06**: ~~One bidirectional model~~ **SUPERSEDED same day**: scope
   narrowed to **S2A only** (speech -> ambient audio) for the first model. A2S
   comes later. The manifests are already direction-specific, so this costs
@@ -301,4 +466,17 @@ run-ID coordination and stage 2 can be rerun independently.
 - Metrics/eval wiring: intentionally not started. FAD/IS/KAD/CLAP-score assets
   are already cached and reusable through `SpeechAudioLM/evaluate.py --stage
   s2a` once there is generated audio worth scoring.
-- A2S direction: not started.
+- A2S content LM: the 97% that is language modelling, over 2048 acoustic codes from 17,596
+  utterances. This is the bottleneck. Untried levers: coarse-to-fine hierarchy (a coarse pass
+  at stride ~8 gives ~19 tokens, which fits the measured ~20-token horizon), BPE over content
+  codes (`src/salm/a2s/content_bpe.py`, written, never run — its PASS bar of "<80 tokens" is
+  four times too lenient given the horizon and must be rewritten first), and variable-length
+  output (speech fills a median 111 of 256 frames, so 57% of the planning budget goes to a
+  tail that carries no words).
+- A per-scene-family diversity metric. `cross_clip_diversity` reads 0.909 for the greedy lane
+  and hides that four stock openings cover 46% of 128 clips; splitting pairs by caption
+  similarity exposes it (0.794 vs 0.909). Until that exists, no diversity claim about a
+  deterministic decoder should be believed.
+- Whether CosyVoice's `llm.pt` pretrained weights would help even though its token space does
+  not. Much bigger commitment; not justified on current evidence.
+
