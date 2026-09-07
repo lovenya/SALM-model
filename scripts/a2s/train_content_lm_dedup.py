@@ -193,6 +193,11 @@ def main() -> int:
     ap.add_argument("--save-every", type=int, default=20)
     ap.add_argument("--max-minutes", type=float, default=0.0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--truncate-speech", action="store_true",
+                    help="Cut each target at its clip's speech boundary instead of filling all "
+                         "256 frames. Speech occupies a median 104 of 256, so this removes the "
+                         "~57%% of the planning budget spent on a wordless tail. No renderer "
+                         "change: expand_sequence already holds the last code past EOS.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -213,6 +218,19 @@ def main() -> int:
     va = load_split(K, "val", args.max_run)
     amb_tr, tok_tr, dur_tr, len_tr = tr
     amb_va, tok_va, dur_va, len_va = va
+    if args.truncate_speech:
+        from salm.a2s.speech_extent import speech_frames, truncate_to_speech
+        for split, (tk, dr, ln) in (("train", (tok_tr, dur_tr, len_tr)),
+                                    ("val", (tok_va, dur_va, len_va))):
+            ef = speech_frames(split, tk.shape[0])
+            t2, d2, l2 = truncate_to_speech(tk, dr, ln, ef)
+            if split == "train":
+                tok_tr, dur_tr, len_tr = t2, d2, l2
+            else:
+                tok_va, dur_va, len_va = t2, d2, l2
+            log(f"  {split}: truncated at the speech boundary -- mean length "
+                f"{ln.mean():.1f} -> {l2.mean():.1f} tokens "
+                f"(speech ends at frame {ef.mean():.0f}/256 on average)")
     ambient_dim = int(amb_tr.shape[2])
     max_tokens = int(tok_tr.shape[1])
 
@@ -318,7 +336,7 @@ def main() -> int:
             "lr": float(opt.param_groups[0]["lr"]),
             "cfg_dropout": args.dropout, "cfg_weight_decay": args.weight_decay,
             "cfg_layers": args.layers, "cfg_max_run": args.max_run,
-            "cfg_lambda_dur": args.lambda_dur, "cfg_num_codes": K,
+            "cfg_lambda_dur": args.lambda_dur, "cfg_num_codes": K, "cfg_truncate_speech": args.truncate_speech,
             "cfg_use_plan": args.use_plan, "cfg_lambda_plan": args.lambda_plan,
             "cfg_n_think": args.n_think,
             "true_mean_tokens": float(len_va.mean()),

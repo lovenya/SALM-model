@@ -110,6 +110,11 @@ def main() -> int:
     ap.add_argument("--lambda-dur", type=float, default=1.0)
     ap.add_argument("--save-every", type=int, default=20)
     ap.add_argument("--max-minutes", type=float, default=0.0)
+    ap.add_argument("--truncate-speech", action="store_true",
+                    help="Cut each target at its clip's speech boundary instead of filling all "
+                         "256 frames. Speech occupies a median 104 of 256, so this removes the "
+                         "~57%% of the planning budget spent on a wordless tail. No renderer "
+                         "change: expand_sequence already holds the last code past EOS.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
@@ -123,6 +128,19 @@ def main() -> int:
     va = load_split(K, "val", args.max_run)
     amb_tr, tok_tr, dur_tr, len_tr = tr
     amb_va, tok_va, dur_va, len_va = va
+    if args.truncate_speech:
+        from salm.a2s.speech_extent import speech_frames, truncate_to_speech
+        for split, (tk, dr, ln) in (("train", (tok_tr, dur_tr, len_tr)),
+                                    ("val", (tok_va, dur_va, len_va))):
+            ef = speech_frames(split, tk.shape[0])
+            t2, d2, l2 = truncate_to_speech(tk, dr, ln, ef)
+            if split == "train":
+                tok_tr, dur_tr, len_tr = t2, d2, l2
+            else:
+                tok_va, dur_va, len_va = t2, d2, l2
+            log(f"  {split}: truncated at the speech boundary -- mean length "
+                f"{ln.mean():.1f} -> {l2.mean():.1f} tokens "
+                f"(speech ends at frame {ef.mean():.0f}/256 on average)")
     ambient_dim = int(amb_tr.shape[2])
 
     # coarse + SEP + fine, worst case. Getting this wrong surfaces as an opaque broadcast
@@ -182,7 +200,7 @@ def main() -> int:
                      args.batch_size, args.device, args.stride)
         m.update({"epoch": epoch, "train_code_loss": run_c / max(nb, 1),
                   "train_dur_loss": run_d / max(nb, 1), "lr": sched.get_last_lr()[0],
-                  "cfg_stride": args.stride, "cfg_num_codes": K,
+                  "cfg_stride": args.stride, "cfg_num_codes": K, "cfg_truncate_speech": args.truncate_speech,
                   "epoch_minutes": (time.time() - t_start) / 60})
         history.append(m)
         log(f"  ep {epoch:03d} train(c {m['train_code_loss']:.3f} d {m['train_dur_loss']:.3f}) "
