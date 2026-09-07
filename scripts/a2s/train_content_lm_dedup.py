@@ -179,6 +179,12 @@ def main() -> int:
                     help="Learnable latent 'think' tokens prepended to the decoder input. The "
                          "model computes over them and the ambient before emitting any code; "
                          "their outputs are discarded. 0 = the old model exactly.")
+    ap.add_argument("--lambda-contrast", type=float, default=0.0,
+                    help="Weight on a contrastive scene term: softplus(CE_true - CE_rolled), "
+                         "per sample. Turns val_scene_gap from a diagnostic into a training "
+                         "objective -- reward the true scene pairing over a mismatched one. "
+                         "0 disables it and the step is bit-identical to before. Costs one "
+                         "extra forward pass per step.")
     ap.add_argument("--use-plan", action="store_true",
                     help="Predict a bag-of-codes plan from the ambient and add it to every "
                          "token embedding. Targets the measured ~20-token plan horizon.")
@@ -275,7 +281,7 @@ def main() -> int:
         model.train()
         t0 = time.time()
         order = rng.permutation(n_train)
-        run_c = run_d = run_p = 0.0
+        run_c = run_d = run_p = run_ctr = 0.0
         nb = 0
         for bi in range(steps):
             sel = np.sort(order[bi * args.batch_size : (bi + 1) * args.batch_size])
@@ -294,6 +300,31 @@ def main() -> int:
             ld = F.cross_entropy(dl.reshape(-1, args.max_run), tf["dur_tgt"].reshape(-1),
                                  ignore_index=-100)
             loss = lc + args.lambda_dur * ld
+            lctr_val = 0.0
+            if args.lambda_contrast > 0.0:
+                # Every intervention so far tried to make better USE of the conditioning; none
+                # ever trained the model to use it. scene_gap has only ever been a diagnostic.
+                #
+                # Per-sample softplus rather than a hinge: no margin to tune, smooth gradients,
+                # and it is exactly the InfoNCE two-way form -- treating the true ambient as the
+                # positive and a different clip's as the negative,
+                #     -log( e^{-CE_true} / (e^{-CE_true} + e^{-CE_rolled}) )
+                #   = softplus(CE_true - CE_rolled)
+                # Rolled, not zeroed: a zeroed memory is out of distribution, so pushing away
+                # from it would teach avoidance of something the model never sees at generation.
+                mem_c = model.encode_ambient(a)
+                cl_r, _ = model(a, tf["codes_in"], tf["durs_in"],
+                                memory=torch.roll(mem_c, shifts=1, dims=0),
+                                pad_mask=tf["pad_mask"])
+                flat_t = tf["code_tgt"].reshape(-1)
+                per = lambda logits: F.cross_entropy(               # noqa: E731
+                    logits.reshape(-1, logits.shape[-1]), flat_t,
+                    ignore_index=-100, reduction="none",
+                ).view(tf["code_tgt"].shape).sum(1) / (tf["code_tgt"] != -100).sum(1).clamp(min=1)
+                ce_true, ce_roll = per(cl), per(cl_r)
+                lctr = F.softplus(ce_true - ce_roll).mean()
+                loss = loss + args.lambda_contrast * lctr
+                lctr_val = float(lctr)
             lp_val = 0.0
             if args.use_plan:
                 # Supervise the plan directly. Without this the plan_proj is zero-initialised
@@ -317,7 +348,7 @@ def main() -> int:
                 sched.step()
             step += 1
             run_c += float(lc.detach()); run_d += float(ld.detach())
-            run_p += lp_val; nb += 1
+            run_p += lp_val; run_ctr += lctr_val; nb += 1
 
         want_sample = (args.sample_every > 0
                        and ((epoch + 1) % args.sample_every == 0 or epoch == args.epochs - 1))
@@ -332,12 +363,14 @@ def main() -> int:
             # arm whose value never moves means the head learned nothing and plan_proj stayed
             # near zero -- the run is a no-op, not a null result, and must not be read as one.
             "train_plan_loss": run_p / max(nb, 1),
+            "train_contrast_loss": run_ctr / max(nb, 1),
             "epoch_minutes": (time.time() - t0) / 60.0,
             "lr": float(opt.param_groups[0]["lr"]),
             "cfg_dropout": args.dropout, "cfg_weight_decay": args.weight_decay,
             "cfg_layers": args.layers, "cfg_max_run": args.max_run,
             "cfg_lambda_dur": args.lambda_dur, "cfg_num_codes": K, "cfg_truncate_speech": args.truncate_speech,
             "cfg_use_plan": args.use_plan, "cfg_lambda_plan": args.lambda_plan,
+            "cfg_lambda_contrast": args.lambda_contrast,
             "cfg_n_think": args.n_think,
             "true_mean_tokens": float(len_va.mean()),
         })

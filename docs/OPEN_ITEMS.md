@@ -35,11 +35,35 @@ we chose against it.
   this item was written. Jobs 443379 / 443475, log entry 2026-09-06.
 
 
-- **[DISCUSS] Contrastive / negative-scene conditioning.** Raised by Lovenya as a VICReg-style
-  idea; refined to a term that turns `val_scene_gap` from a diagnostic into a training
-  objective (reward the true scene pairing, penalise a mismatched one). Deliberately held: the
-  +0.021 invariance suggests the ceiling may be in the data rather than the objective, so this
-  should follow the dedup result rather than precede it. Not implemented — no code exists.
+- ~~**[IMPL] Contrastive / negative-scene conditioning.**~~ **Implemented 2026-09-07**,
+  `--lambda-contrast` in `scripts/a2s/train_content_lm_dedup.py`. Per-sample
+  `softplus(CE_true - CE_rolled)` -- the InfoNCE two-way form with the true ambient as positive
+  and a rolled batch (a different clip's ambient) as negative. Rolled rather than zeroed for the
+  same reason the ablation uses rolling: a zeroed memory is out of distribution, so pushing away
+  from it teaches avoidance of something never seen at generation. Costs one extra forward pass
+  per step. `0.0` disables it and leaves the step bit-identical.
+
+  **The rationale that survived measurement.** Lovenya raised this as a VICReg-style idea. The
+  variance and covariance terms of VICReg proper turn out to have nothing to fix here: on the
+  cached CLAP ambient features, only **1 of 768** dimensions is collapsed (std < 0.01, mean std
+  0.368), and although the effective rank is low (50 of 768, 6.5%), the scene only carries
+  **5.3 nats ≈ 7.6 bits** per utterance -- 50 dimensions is orders of magnitude more than enough
+  to hold that. Decorrelating cannot add information the ambient does not have. What IS untried
+  is the third idea in the original entry: every intervention so far tried to make better *use*
+  of the conditioning, and none ever *trained* the model to use it. `scene_gap` has only ever
+  been a diagnostic.
+
+  **[DISCUSS] before it is trusted -- the term is gameable and this is not hypothetical.** It
+  depends only on the DIFFERENCE, so `CE_true 1.50 / CE_roll 4.00` and `CE_true 1.20 /
+  CE_roll 3.70` give an identical loss of 0.0789. A model can minimise it by becoming brittle
+  to mismatch rather than better at the true pairing -- which is precisely the pattern where
+  `val_scene_gap` rises with overfitting (LEARNINGS, 2026-09-05). **`val_code_loss` on the true
+  pairing is the number that decides whether it worked**, not the gap. Any run using this must
+  report both, and a gap that grows while `val_code_loss` worsens is the term gaming itself.
+
+  Still unmeasured: whether the TRAINED projections (`conditioner`, `ambient_proj`) collapse
+  those 50 dimensions further. That needs a GPU forward pass, and if they do, a variance term
+  on the projection output becomes well-motivated after all.
 
 - ~~**[DONE] Transcript coherence needs its own metric.**~~ Three were built and none of them
   measured coherence: `cross-seed agreement` (job 442814) measures determinism, which a
