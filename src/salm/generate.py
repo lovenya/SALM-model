@@ -524,6 +524,7 @@ def main() -> int:
     content_codebook = None
     content_lm = None
     lm_is_dedup = False
+    lm_is_hier = False
     if args.mode in ("s2a", "a2s", "b0"):
         log("Loading trained checkpoint ...")
         encoder, conditioner, payload = load_s2a_checkpoint(Path(args.checkpoint), args.device)
@@ -623,31 +624,56 @@ def main() -> int:
                 # wrong architecture and either crash on a state_dict mismatch or, worse,
                 # silently sample in the wrong representation.
                 if lm_payload.get("dedup"):
-                    from salm.a2s.content_lm_dedup import ContentLMDedup
+                    lm_is_hier = bool(lm_payload.get("hier", False))
+                    if lm_is_hier:
+                        # Coarse-to-fine: a different class, a different vocabulary width
+                        # (K+3 head for SEP and EOS) and a two-phase sampler. Detected from
+                        # the checkpoint's own flag rather than a caller argument, so a hier
+                        # checkpoint can never be silently loaded as a flat one -- the
+                        # state_dict would refuse, but only after the job had queued.
+                        from salm.a2s.content_lm_hier import ContentLMHier
 
-                    content_lm = ContentLMDedup(
-                        num_codes=int(lm_payload["num_codes"]),
-                        max_run=int(lm_payload["max_run"]),
-                        ambient_dim=int(lm_payload["ambient_dim"]),
-                        max_tokens=int(lm_payload["max_tokens"]),
-                        d_model=int(lm_payload["d_model"]),
-                        n_layers=int(lm_payload["layers"]),
-                        n_heads=int(lm_payload["heads"]),
-                        # Absent in pre-plan checkpoints; default False keeps them loadable.
-                        use_plan=bool(lm_payload.get("use_plan", False)),
-                        # Absent in pre-think checkpoints; 0 keeps them loadable.
-                        n_think=int(lm_payload.get("n_think", 0)),
-                    ).to(args.device)
-                    content_lm.load_state_dict(lm_payload["model"])
-                    content_lm.eval()
+                        content_lm = ContentLMHier(
+                            num_codes=int(lm_payload["num_codes"]),
+                            max_run=int(lm_payload["max_run"]),
+                            ambient_dim=int(lm_payload["ambient_dim"]),
+                            max_tokens=int(lm_payload["max_tokens"]),
+                            d_model=int(lm_payload["d_model"]),
+                            n_layers=int(lm_payload["layers"]),
+                            n_heads=int(lm_payload["heads"]),
+                            stride=int(lm_payload.get("stride", 8)),
+                        ).to(args.device)
+                        content_lm.load_state_dict(lm_payload["model"])
+                        content_lm.eval()
+                        log(f"    ContentLMHier: stride={content_lm.stride}, "
+                            f"K={content_lm.num_codes}, epoch={lm_payload.get('epoch')}")
+                    else:
+                        from salm.a2s.content_lm_dedup import ContentLMDedup
+
+                        content_lm = ContentLMDedup(
+                            num_codes=int(lm_payload["num_codes"]),
+                            max_run=int(lm_payload["max_run"]),
+                            ambient_dim=int(lm_payload["ambient_dim"]),
+                            max_tokens=int(lm_payload["max_tokens"]),
+                            d_model=int(lm_payload["d_model"]),
+                            n_layers=int(lm_payload["layers"]),
+                            n_heads=int(lm_payload["heads"]),
+                            # Absent in pre-plan checkpoints; False keeps them loadable.
+                            use_plan=bool(lm_payload.get("use_plan", False)),
+                            # Absent in pre-think checkpoints; 0 keeps them loadable.
+                            n_think=int(lm_payload.get("n_think", 0)),
+                        ).to(args.device)
+                        content_lm.load_state_dict(lm_payload["model"])
+                        content_lm.eval()
+                        mm = lm_payload.get("metrics", {})
+                        log(f"    ContentLM (RUN-LENGTH): "
+                            f"{content_lm.num_parameters()/1e6:.2f}M params, "
+                            f"K={content_lm.num_codes}, max_run={content_lm.max_run}, "
+                            f"epoch={lm_payload.get('epoch')}, "
+                            f"scene_gap={mm.get('val_scene_gap', float('nan')):+.4f}, "
+                            f"dur_acc={mm.get('val_dur_acc', float('nan')):.3f}")
+                    # Both branches take the run-length expansion path at generation time.
                     lm_is_dedup = True
-                    mm = lm_payload.get("metrics", {})
-                    log(f"    ContentLM (RUN-LENGTH): "
-                        f"{content_lm.num_parameters()/1e6:.2f}M params, "
-                        f"K={content_lm.num_codes}, max_run={content_lm.max_run}, "
-                        f"epoch={lm_payload.get('epoch')}, "
-                        f"scene_gap={mm.get('val_scene_gap', float('nan')):+.4f}, "
-                        f"dur_acc={mm.get('val_dur_acc', float('nan')):.3f}")
                 else:
                     content_lm = ContentLM(
                         num_codes=int(lm_payload["num_codes"]),
@@ -936,16 +962,34 @@ def main() -> int:
                         from salm.a2s.content_dedup import expand_sequence
                         from salm.a2s.ctc_probe import CTC_FRAMES_OUT as CTC_FRAMES
 
-                        tok_rows, dur_rows = content_lm.sample(
-                            feats.float(),
-                            total_frames=CTC_FRAMES,
-                            temperature=args.content_lm_temperature,
-                            dur_temperature=(args.content_lm_dur_temperature or None),
-                            top_k=args.content_lm_top_k,
-                            top_p=args.content_lm_top_p,
-                            cfg_scale=args.content_lm_cfg,
-                            generator=lm_generator,
-                        )
+                        if lm_is_hier:
+                            # Two-phase sampler with a different signature: no separate
+                            # duration temperature, and it returns the coarse LENGTH as a
+                            # third value. That length is not decoration -- a row whose
+                            # coarse pass collapsed to nothing produced fine tokens with no
+                            # plan behind them, which is a failed run that otherwise looks
+                            # like a normal one.
+                            tok_rows, dur_rows, n_coarse = content_lm.sample(
+                                feats.float(),
+                                total_frames=CTC_FRAMES,
+                                temperature=args.content_lm_temperature,
+                                top_k=args.content_lm_top_k,
+                                generator=lm_generator,
+                            )
+                            log(f"      coarse plan: {np.mean(n_coarse):.1f} tokens "
+                                f"(min {min(n_coarse)}, max {max(n_coarse)}); "
+                                f"{sum(1 for c in n_coarse if c == 0)} rows planned NOTHING")
+                        else:
+                            tok_rows, dur_rows = content_lm.sample(
+                                feats.float(),
+                                total_frames=CTC_FRAMES,
+                                temperature=args.content_lm_temperature,
+                                dur_temperature=(args.content_lm_dur_temperature or None),
+                                top_k=args.content_lm_top_k,
+                                top_p=args.content_lm_top_p,
+                                cfg_scale=args.content_lm_cfg,
+                                generator=lm_generator,
+                            )
                         frames = np.stack([
                             expand_sequence(np.asarray(t), np.asarray(d), total=CTC_FRAMES)
                             for t, d in zip(tok_rows, dur_rows)
