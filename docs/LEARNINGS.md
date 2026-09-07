@@ -412,3 +412,59 @@ conditioning-gap metric that rises with overfitting, or an intelligibility score
 saying something clearly over saying the right thing. In each case the defence is identical and
 cheap — before trusting a metric as evidence for a mechanism, construct the strongest thing
 that could move it *without* that mechanism, and measure that too.
+
+---
+
+## Pre-registering a metric does not protect you if the metric cannot resolve anything
+
+*2026-09-07, found by an independent audit of jobs 443751 / 443989 / 444750*
+
+**The principle:** a pre-registered success criterion is only a safeguard if the statistic it
+names can actually distinguish the outcomes. Fixing the criterion in advance protects against
+moving the goalposts; it does nothing about a metric with no resolution, and it actively
+*causes* harm when the same pre-registration rules out the measurement that would have worked.
+
+A project measuring conditional generation quality adopted a "plan horizon" statistic: the
+first output position where agreement between runs on the same input drops below a threshold.
+It was pre-registered as **the deliverable** for three consecutive experiments. Across every
+arm and every control ever measured, it returned:
+
+```
+experiment A (3 arms):  1, 0, 1
+experiment B (3 arms):  1, 1, 1
+experiment C (3 arms):  1, 1, 1
+```
+
+**Observed range across all nine conditions: {0, 1}.** A statistic that takes two values across
+every condition anyone has tried cannot support a verdict about any of them. All three
+experiments were written up as null.
+
+The first of those experiments had also scored the project's ordinary audio metric and written
+it to disk. Re-analysed later, paired per input, the treatment beat its own matched control by
+an effect comparable to the largest improvement the project had ever recorded. **Nobody opened
+the file** — because the experiment's own pre-registration said, in as many words, *"NOT AN
+OUTCOME: [that metric]."* The direction was closed and the checkpoints deleted.
+
+**Three failures compounded**, and they are separable:
+
+1. **No resolution check.** Nobody asked what range the statistic takes across known-different
+   conditions before trusting it. One pass over existing results would have shown {0, 1}.
+2. **Ruling a metric inadmissible in advance.** The exclusion was well-motivated — that metric
+   had known biases — but "biased" is not "useless." A bias that is *measurable* (here: the
+   score rose ~0.009 per output token, r = 0.31) can be *controlled for*. Excluding it outright
+   discarded the only instrument that was working.
+3. **Reading only the pre-registered number.** The job produced several measurements. Only the
+   named one was examined, so the others could not correct it.
+
+**What to do instead.** Before a statistic can be a deliverable, establish its **resolution**:
+compute it on conditions already known to differ and confirm it separates them. If it returns
+the same value for a control and a strong treatment, it is not measuring the thing. And prefer
+*adjusting* a biased metric to *excluding* it — a known bias is a covariate, not a
+disqualification. Excluding it leaves you with whatever remains, which may be nothing.
+
+**The generalisation, and why it is worth stating separately.** Pre-registration guards against
+one failure mode — post-hoc rationalisation — and teams that adopt it often believe they are
+now protected generally. They are not. It offers no defence against an underpowered design, a
+metric with no resolution, or a confound, and by fixing attention on a single number in advance
+it can make all three *harder* to notice. Pre-register the criterion **and** the resolution
+check that licenses it.
