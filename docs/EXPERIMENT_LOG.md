@@ -2659,3 +2659,52 @@ to ask about an utterance. Those need separating before another plan-shaped idea
 - Job 443989 (latent think tokens) is the follow-up, deliberately shaped to impose **no target**
   so it cannot inherit the same failure.
 - Any auxiliary-loss head from here states its scene-blind baseline before the run, not after.
+
+---
+
+## The A2S renderer lineage: v1 → v2 → v3 → v4 → rladder (recorded 2026-09-06, before deleting v3)
+
+Written because the docs said almost nothing about this — one line in `CONTEXT.md` ("v3/v4
+established the renderer works") — and `content_concat_v3` was about to be deleted for space.
+Reconstructed from each run's own `config.json` and `history.json`, not from memory.
+
+**The surprise: there is no design change anywhere in v2 → v3 → v4.** Diffing the configs, the
+only fields that differ across the three are `epochs` and `lr_total_steps`:
+
+| | v2 | v3 | v4 |
+|---|---|---|---|
+| `content_concat_mode` | full | full | full |
+| `content_concat_channels` | 8 | 8 | 8 |
+| `content_dropout_prob` | 0.1 | 0.1 | 0.1 |
+| epochs | 100 | 100 | **200** |
+| `lr_total_steps` | 6800 | 6800 | **13600** |
+
+| run | epochs | best `val_x0_rel_mse` | final `val_content_bind_gap` |
+|---|---|---|---|
+| content_concat_v2 | 100 | 0.2884 @ep91 | +0.3172 |
+| content_concat_v3 | 100 | **0.2885 @ep91** | +0.3172 |
+| content_concat_v4 | 200 | 0.2802 @ep158 | +0.3585 |
+
+**v3 is a re-run of v2 with an identical config**, and it reproduced it to four decimal places
+(0.2884 vs 0.2885, same best epoch, same bind gap). That is a useful fact in itself — this
+training is reproducible — but it means v3 contains no information v2 does not.
+
+**v4 is the same configuration trained twice as long.** Every "v3 → v4" improvement is
+training length, nothing else. Anyone reading "we moved to v4" and inferring an architectural
+change would be wrong, which is precisely why this entry exists.
+
+**The design change that mattered happened earlier**, at v1: frame-aligned channel
+CONCATENATION replacing IP-Adapter cross-attention (commits 209e8cb, 656816d), after job
+432420 falsified cross-attention — oracle and shuffled content produced indistinguishable
+audio, so the cross-attention branch registered content PRESENCE but not IDENTITY.
+`content_concat_mode: full` rather than `broadcast` was the other real decision, argued in
+`configs/exp/content_concat.yaml`: with broadcast the content channels are constant along
+frequency, so conv_in's contribution is provably constant in f, and phoneme identity is a
+frequency-distribution fact that a per-time scalar field cannot carry.
+
+**Superseded by `rladder_20260906_1654`**, 150 further epochs from v4's best under a single
+schedule — flat from ~ep39 onward (0.3161–0.3180 `inter_asr_dist`, a 0.002 spread), and
+Lovenya preferred the 100+ epoch rungs by ear. The renderer is settled and frozen there.
+
+**Therefore `content_concat_v3` is safe to delete**: identical config to v2, identical results,
+and strictly superseded twice over. Recorded here so the lineage survives the checkpoints.
