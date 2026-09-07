@@ -25,6 +25,11 @@ The scene constrains the OPENING and the TOPIC, not word 7. Every conditioning i
 tried was attempting to extract information that is not present, which is why they all landed
 where they did.
 
+**Best results and the deliverable shortlist: `docs/BEST_RESULTS.md`** — ranked by ear, with
+exact reproduction paths and a PROTECTED artifact list (5.6 GB) that must be checked before any
+cleanup. Written after a working result was closed on the wrong metric and its checkpoints
+deleted on the agent's recommendation.
+
 **Operating point (use these):**
 - renderer: `runs/a2s_audioldm_clapseq_xformer/rladder_20260906_1654/checkpoints/checkpoint_ep119.pt` — FROZEN
 - content LM: `content_lm/dedup_k2048/checkpoints/checkpoint_best_loss.pt` (epoch 9)
