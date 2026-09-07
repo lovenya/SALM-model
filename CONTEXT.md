@@ -50,7 +50,7 @@ val_loss 5.01 against `best_loss`'s 2.37. Under sampling the two scored alike; u
 | plan vector (bag-of-codes) | 443751 | null — target carried 0.0040 nats over scene-blind |
 | latent think tokens | 443989 | null — horizon flat at 1 across n_think 0/8/32 |
 | renderer trained on quantized content | 443895 | **worse** (0.5903 vs 0.3223 control) |
-| CosyVoice token space | 444076 | **ours is more structured** (35.9% vs −10.7%) |
+| CosyVoice token space | 444076 | ours more structured, but the margin was overstated — see below |
 | CTC "peakiness" (D3 pre-net premise) | — | false: every code used, mean run 68–80 ms |
 | speaker entanglement of codes | — | gender explains 0.6% of code entropy |
 
@@ -71,6 +71,16 @@ of plan. The full sequence it must generate is **151.4 tokens** (measured, k2048
 not the 56 first claimed — 56 was the speech region only (111 of 256 frames), but the model
 must also emit the silent tail. **The shortfall is 7.6×, not 2.8×.** Compression cannot close
 it (it shrinks both sides equally), which is why run-length's 2.0× bought so little.
+
+**CORRECTION (2026-09-07), from the independent audit.** The CosyVoice comparison was
+confounded. Our +35.9% n-gram reduction was measured on FRAME-LEVEL codes with mean run 1.76,
+so a third of it was simply "the next frame repeats"; CosyVoice's 25 Hz tokens are already
+run-collapsed (mean run 1.08). Recomputed on our run-length codes, the fair comparison is
+**20.7% vs −10.7%** — still decisively ours, but a 31-point gap rather than 47. The direction
+stays closed; it was closed on an inflated number. Unresolved: CosyVoice's negative value may
+itself be a sparsity artifact (vocab 6,561, ~0.004 observations per trigram context). The
+bigram row (−0.202 at ~28 observations per context) argues against that, but settling it needs
+re-extracting its tokens over more data.
 
 **No unpaired speech exists.** `datasets/` holds only TTAS (22,793 clips, 17,596 already train).
 Pretraining the content LM on speech-only data — which needs no ambient — is a download
