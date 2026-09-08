@@ -376,6 +376,16 @@ def main() -> int:
                          "head (0 = use --content-lm-temperature). Separable because duration "
                          "is far lower-entropy than code identity (median 1, mean ~1.8), so "
                          "it usually wants sharper sampling than the codes do")
+    ap.add_argument("--content-lm-max-frames", type=int, default=0,
+                    help="Stop the content LM after this many frames instead of filling all "
+                         "256; the remainder is padded by holding the last code, exactly what "
+                         "the renderer already sees when a sequence ends early. 0 = no cap.\n"
+                         "WHY: speech occupies a median 111 of 256 frames, and the flat model "
+                         "over-talks -- 17.6 words against a human reference of 13.3, with 42% "
+                         "of utterances running past 1.5x their reference. The best result on "
+                         "record (hier stride-12) wins for exactly one measured reason: it "
+                         "stops earlier (11.1 words). This tests whether the length alone "
+                         "reproduces that, with no retraining and no hierarchy.")
     ap.add_argument("--content-lm-cfg", type=float, default=1.0,
                     help="Classifier-free guidance scale for the content LM's code head. "
                          "1.0 = unguided (identical to before). >1 extrapolates away from what "
@@ -962,6 +972,14 @@ def main() -> int:
                         from salm.a2s.content_dedup import expand_sequence
                         from salm.a2s.ctc_probe import CTC_FRAMES_OUT as CTC_FRAMES
 
+                        # The LM may be stopped early, but the concat channel still demands
+                        # exactly CTC_FRAMES; expand_sequence pads by holding the last code.
+                        lm_budget = (min(args.content_lm_max_frames, CTC_FRAMES)
+                                     if args.content_lm_max_frames > 0 else CTC_FRAMES)
+                        if lm_budget != CTC_FRAMES:
+                            log(f"      content budget CLAMPED to {lm_budget}/{CTC_FRAMES} "
+                                f"frames ({lm_budget/25:.2f}s of speech, then held)")
+
                         if lm_is_hier:
                             # Two-phase sampler with a different signature: no separate
                             # duration temperature, and it returns the coarse LENGTH as a
@@ -971,7 +989,7 @@ def main() -> int:
                             # like a normal one.
                             tok_rows, dur_rows, n_coarse = content_lm.sample(
                                 feats.float(),
-                                total_frames=CTC_FRAMES,
+                                total_frames=lm_budget,
                                 temperature=args.content_lm_temperature,
                                 top_k=args.content_lm_top_k,
                                 generator=lm_generator,
@@ -982,7 +1000,7 @@ def main() -> int:
                         else:
                             tok_rows, dur_rows = content_lm.sample(
                                 feats.float(),
-                                total_frames=CTC_FRAMES,
+                                total_frames=lm_budget,
                                 temperature=args.content_lm_temperature,
                                 dur_temperature=(args.content_lm_dur_temperature or None),
                                 top_k=args.content_lm_top_k,
