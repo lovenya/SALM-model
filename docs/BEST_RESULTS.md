@@ -40,11 +40,26 @@ python -m salm.generate --mode a2s --direction a2s \
   --split val --num-samples 64 --start-index 0 --seed 1337 --out-dir OUT --copy-reference
 ```
 
-**Why it wins, measured:** not better planning. It stops earlier — 11.1 words against the flat
-model's 17.6, where the human reference is 13.3, and only 11% of its utterances run past 1.5x
-their reference against the flat model's 42%. Length control, not hierarchy. Job 444750, and
-the ordered stride prediction it was built to test actually FAILED (horizons flat at 1 across
-strides 6/8/12).
+**Why it wins: UNEXPLAINED.** The hierarchy is not the reason — the ordered stride prediction
+job 444750 was built to test failed outright (horizons flat at 1 across strides 6/8/12).
+
+The obvious candidate was length: this model produces 11.1 words against the flat model's 17.6,
+where the human reference is 13.3, and only 11% of its utterances run past 1.5x their reference
+against the flat model's 42%.
+
+**That candidate is now in doubt.** Job 448455 clamped the flat model's decode budget to 111 and
+90 frames, bringing its word count to 13.7 and 13.1 — essentially the human rate — and the audio
+got WORSE, not better (0.3404 → 0.4216 and 0.4155, all CIs excluding zero, and worse still after
+length adjustment). If shortness were the mechanism, that should have moved toward 0.2949.
+
+But that job tested FORCEFUL TRUNCATION, not learned stopping: it cuts the model off mid-utterance
+whether or not it had finished, so the tail is severed rather than completed. It therefore does
+not settle the question. **The property that matters may be "coherent completion" rather than
+"length", and a decode-time cap cannot produce it.** The experiment that would separate the two —
+training with the targets trimmed at the speech boundary, so the model learns to emit EOS there
+itself (`--truncate-speech`) — has not been run.
+
+Until it has, treat the reason this lane wins as OPEN.
 
 ---
 
