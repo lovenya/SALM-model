@@ -116,3 +116,28 @@ body{background:#fff}
 .system-output audio,.pair-recording audio{accent-color:var(--accent)}
 @media(max-width:850px){.contribution,.contribution+.contribution{padding:20px!important}}
 @media(max-width:650px){.intro{margin-top:24px;padding-left:20px}.section-heading{padding-left:11px}}
+
+/* Two paired recordings introduce the bidirectional task on the homepage. */
+.page-index .intro{max-width:1100px}
+.task-intro{margin:35px 0 24px}
+.task-intro-heading{margin-bottom:17px}
+.task-intro-heading .eyebrow{margin-bottom:7px}
+.task-intro-heading h2{font-size:clamp(25px,3vw,33px);margin-bottom:8px}
+.task-intro-heading .quiet{max-width:690px;margin-bottom:0}
+.task-preview-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.task-preview{display:flex;flex-direction:column;min-width:0;background:#fff;border:1px solid var(--line);border-top:4px solid #8a63bc;border-radius:7px;padding:18px 19px;box-shadow:0 4px 17px rgba(49,31,62,.06)}
+.task-preview[data-direction="s2a"]{border-top-color:#55a8a1}
+.preview-direction{font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--accent);margin:0 0 5px}
+.task-preview[data-direction="s2a"] .preview-direction{color:#367972}
+.task-preview h3{font-family:var(--serif);font-size:21px;letter-spacing:-.02em;margin-bottom:15px}
+.preview-step{padding:12px 13px;border:1px solid var(--line);border-radius:5px;background:#fff}
+.preview-step-heading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:7px}
+.preview-step-heading .small-label{font-size:9px}
+.preview-step-heading strong{font-size:12px;font-weight:600}
+.preview-step audio{display:block;width:100%;height:36px;accent-color:var(--accent)}
+.preview-text{font-size:12px;line-height:1.55;margin:9px 0 0}
+.preview-text span{display:block;font-size:9px;letter-spacing:.04em;color:var(--muted);margin-bottom:2px}
+.preview-arrow{color:var(--accent);font-size:20px;line-height:1;text-align:center;padding:7px 0}
+.task-preview .text-link{display:inline-block;margin-top:auto;padding-top:13px;font-size:12px}
+@media(max-width:800px){.task-preview-grid{grid-template-columns:1fr}}
+@media(max-width:650px){.task-preview{padding:16px}.task-preview h3{font-size:20px}.task-intro{margin-top:27px}}

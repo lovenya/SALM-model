@@ -7,7 +7,9 @@ pushed and GitHub Pages finishes deploying. The template's `site-data.js` is
 deliberately empty; publish a built release, not this template.
 
 The site has a paper-title homepage, Dataset, G-Eval Audio, Results, Model, and
-Examples pages. The Model architecture content is deferred. The Examples page
+Examples pages. The homepage opens with one paired-reference listening example
+for each direction; both link to their full comparisons. The Model architecture
+content is deferred. The Examples page
 uses 100 common clean-v2 test IDs, seven recordings per ID, both reference
 texts, dataset pairing rationale, speaker metadata, and a direction switch.
 Direct and cascade systems appear side by side on wide screens. Each generated

@@ -54,6 +54,18 @@ for(const page of ['index.html','dataset.html','geval.html','results.html','mode
  const rendered=app(page);
  assert.equal(rendered.document.querySelectorAll('[data-site-style]').length,0);
 }
+const home=app('index.html');
+const previews=home.get('#task-previews').innerHTML;
+assert.equal((previews.match(/class="task-preview"/g)||[]).length,2);
+assert.equal((previews.match(/<audio /g)||[]).length,4);
+assert(previews.includes('A horse is trotting')&&previews.includes('Water flowing very fast and loud'));
+for(const [,src] of previews.matchAll(/<audio [^>]*src="([^"]+)"/g))assert(fs.existsSync(path.join(release,decode(src))),src);
+for(const [direction,id] of [['a2s','35r9Zwy0XX0'],['s2a','50Pb8Q7RFnw']]){
+ const query=new URLSearchParams({direction,sample:id,view:'compare'});
+ assert(decode(previews).includes(`href="examples.html?${query}"`));
+}
+const homeAudio=home.document.querySelectorAll('audio');
+homeAudio.forEach(a=>a.paused=false);homeAudio[0].handlers.play();assert(homeAudio.slice(1).every(a=>a.paused));
 const gevalPage=app('geval.html');
 for(const direction of ['a2s','s2a']){
  const table=gevalPage.get(`#geval-summary-${direction}`).innerHTML;
@@ -135,4 +147,4 @@ ui=app('examples.html','',hostile);assert(ui.markup().includes('&lt;img'));asser
 const missing=JSON.parse(JSON.stringify(data));missing.samples[0].judgments={};
 ui=app('examples.html','',missing);assert.equal((ui.markup().match(/class="rating"/g)||[]).length,15);assert(ui.markup().includes('Feedback unavailable'));
 assert(!/\d[\d,]+\s+(?:of|\/)\s+\d[\d,]+/.test(data.benchmarks.a2s.note));
-console.log(JSON.stringify({result:'pass',states,samples:data.samples.length,pages:6,checks:['G-Eval criterion tables','matched/mismatched controls','ten high/low criterion demos and deep links','shared-ID direction switch','dataset/compare views','caption, transcript and ID search','previous/next','mobile selector','single-audio playback','all media paths','five score tiles per output','feedback and prompt markup','escaping and missing data'],limitation:'DOM stand-in; no browser layout, keyboard or audio decoding test'},null,2));
+console.log(JSON.stringify({result:'pass',states,samples:data.samples.length,pages:6,checks:['homepage paired listening examples','G-Eval criterion tables','matched/mismatched controls','ten high/low criterion demos and deep links','shared-ID direction switch','dataset/compare views','caption, transcript and ID search','previous/next','mobile selector','single-audio playback','all media paths','five score tiles per output','feedback and prompt markup','escaping and missing data'],limitation:'DOM stand-in; no browser layout, keyboard or audio decoding test'},null,2));

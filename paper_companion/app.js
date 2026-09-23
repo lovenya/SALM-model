@@ -71,6 +71,21 @@
   if($('#criterion-demos'))$$('#criterion-demos audio').forEach(a=>a.addEventListener('play',()=>$$('#criterion-demos audio').forEach(other=>{if(other!==a)other.pause();})));
   if (!data.release) $('#main')?.insertAdjacentHTML('afterbegin','<p class="notice"><strong>Source template.</strong> Build the release to load real recordings and verified evaluation results.</p>');
   document.addEventListener('keydown',event=>{if(event.key==='Escape' && document.activeElement?.closest('.metric-tip'))document.activeElement.blur();});
+  const previews=$('#task-previews');
+  if(previews){
+    const picked=[data.samples.find(s=>s.sample_id==='35r9Zwy0XX0')||data.samples[0],data.samples.find(s=>s.sample_id==='50Pb8Q7RFnw')||data.samples.find(s=>s.sample_id!==data.samples[0]?.sample_id)||data.samples[0]];
+    const previewAudio=(label,src)=>src?`<audio controls preload="none" aria-label="${escape(label)}" src="${escape(src)}"><a href="${escape(src)}">Listen to WAV</a></audio>`:'<p class="missing">Recording unavailable.</p>';
+    const previewCard=(direction,sample)=>{
+      if(!sample)return '';
+      const a2s=direction==='a2s',input=a2s?['Environmental audio',sample.files.reference_audio,'Dataset caption',sample.audio_caption]:['Speech',sample.files.reference_speech,'Dataset transcript',sample.speech_text];
+      const reference=a2s?['Speech',sample.files.reference_speech,'Dataset transcript',sample.speech_text]:['Environmental audio',sample.files.reference_audio,'Dataset caption',sample.audio_caption];
+      const step=(role,recording)=>`<div class="preview-step"><div class="preview-step-heading"><span class="small-label">${role}</span><strong>${recording[0]}</strong></div>${previewAudio(`${role.toLowerCase()} ${recording[0].toLowerCase()} for ${sample.sample_id}`,recording[1])}<p class="preview-text"><span>${recording[2]}</span>${escape(recording[3])}</p></div>`;
+      const query=new URLSearchParams({direction,sample:sample.sample_id,view:'compare'});
+      return `<article class="task-preview" data-direction="${direction}"><p class="preview-direction">${a2s?'01 / AUDIO → SPEECH':'02 / SPEECH → AUDIO'}</p><h3>${a2s?'From a scene to a voice':'From a voice to a scene'}</h3>${step('INPUT',input)}<div class="preview-arrow" aria-hidden="true">↓</div>${step('PAIRED REFERENCE',reference)}<a class="text-link" href="examples.html?${escape(query)}">Compare generated ${a2s?'speech':'audio'} →</a></article>`;
+    };
+    previews.innerHTML=picked.every(Boolean)?previewCard('a2s',picked[0])+previewCard('s2a',picked[1]):'<p class="missing">Build the release to load paired listening examples.</p>';
+    const players=$$('audio');players.forEach(player=>player.addEventListener('play',()=>players.forEach(other=>{if(other!==player)other.pause();})));
+  }
   if (!$('#selected-example')) return;
 
   const params=new URLSearchParams(location.search);
