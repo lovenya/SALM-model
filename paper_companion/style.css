@@ -106,7 +106,7 @@ html[data-site-style="editorial"] .contribution-grid{border-top:2px solid var(--
 html[data-site-style="editorial"] .page-intro{border-bottom:1px solid var(--line)}
 html[data-site-style="editorial"] .workspace-heading{border-bottom:2px solid var(--accent)}
 html[data-site-style="editorial"] .systems-grid .system-output{box-shadow:0 5px 20px rgba(49,31,62,.055)}
-html[data-site-style="editorial"] .systems-grid .rating,html[data-site-style="editorial"] .systems-grid .rating+.rating{background:#fffaf0;border-color:#e9dbc0}
+html[data-site-style="editorial"] .systems-grid .rating,html[data-site-style="editorial"] .systems-grid .rating+.rating{background:#f8f5fb;border-color:#e3d9ed}
 html[data-site-style="editorial"] .sample-choice[aria-current]{border-left:3px solid var(--accent)}
 
 html[data-site-style="studio"]{--paper:#fff;--ink:#17303e;--muted:#526a77;--line:#cbdde6;--accent:#08668d;--accent-dark:#174965;--accent-light:#e8f5fa}
@@ -172,11 +172,6 @@ html[data-site-style="editorial"] .geval-table thead th,html[data-site-style="ed
 html[data-site-style="editorial"] .systems-grid .system-output[data-system="ours"]{border-top:4px solid #8a63bc}
 html[data-site-style="editorial"] .systems-grid .system-output[data-system="flat"]{border-top:4px solid #e48a87}
 html[data-site-style="editorial"] .systems-grid .system-output[data-system="cascade"]{border-top:4px solid #55a8a1}
-html[data-site-style="editorial"] .systems-grid .rating:nth-child(1){background:#f2eafe;border-color:#d8c7ef}
-html[data-site-style="editorial"] .systems-grid .rating:nth-child(2){background:#fff0f2;border-color:#f2cdd3}
-html[data-site-style="editorial"] .systems-grid .rating:nth-child(3){background:#fff6e7;border-color:#efdbb7}
-html[data-site-style="editorial"] .systems-grid .rating:nth-child(4){background:#edf7fc;border-color:#cce4ef}
-html[data-site-style="editorial"] .systems-grid .rating:nth-child(5){background:#eef8f2;border-color:#cae6d6}
 
 html[data-site-style="studio"]{--accent:#2058b5;--accent-dark:#183f86;--accent-light:#e9f0ff}
 html[data-site-style="studio"] .site-header{border-top:5px solid #2058b5;border-image:linear-gradient(90deg,#2058b5 0 48%,#23aab6 48% 77%,#e78a53 77%) 1}
