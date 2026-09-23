@@ -32,12 +32,11 @@ missing-score fallback and HTML escaping. Public data has no private absolute
 filesystem paths.
 
 The remaining 900 text fields are listed in `missing-data.json`: 400 cascade
-intermediates and 500 output transcripts/captions. Browser layout, real audio
-decoding and keyboard/touch behavior have not been tested in a browser because
-none is installed here. The public URL could not be fetched from this cluster;
-review the deployed site after pushing the website commit.
-
-The interface and published-data schema were revised after the validation
-above: system coverage counts and derived scene-group fields were removed,
-metrics were hidden as requested, and system cards were rearranged. Those
-latest display changes have not been rerun through the validators.
+intermediates and 500 output transcripts/captions. The website checkout at
+`/scratch/lovenya/speechaudiolm-paper` passed both validators after the latest
+display changes on 2026-09-23. The public HTML and both JavaScript files were
+fetched successfully and matched the committed local files; the public site
+was not exercised in a browser here. The user confirmed that the deployed
+examples render in Chrome and in Edge after a hard reload. Browser layout,
+audio decoding and keyboard/touch behavior still need a focused check after
+the next push.

@@ -77,9 +77,13 @@ assert.equal((ui.markup().match(/class="rating"/g)||[]).length,15);
 assert.equal((ui.markup().match(/class="verdict"/g)||[]).length,15);
 assert.equal((ui.markup().match(/class="prompt"/g)||[]).length,15);
 assert(!/undefined|NaN/.test(ui.markup()));
+assert(decode(ui.markup()).includes(`<h2>${data.samples[0].audio_caption}</h2>`));
+assert(decode(ui.get('#sample-list').innerHTML).includes(`<strong>${data.samples[0].audio_caption}</strong>`));
 const initial=new URLSearchParams(ui.context.location.search).get('sample');
 ui.fire('[data-direction="s2a"]');
 assert.equal(new URLSearchParams(ui.context.location.search).get('sample'),initial);
+assert(decode(ui.markup()).includes(`<h2>${data.samples[0].speech_text}</h2>`));
+assert(decode(ui.get('#sample-list').innerHTML).includes(`<strong>${data.samples[0].speech_text}</strong>`));
 assert.equal(ui.document.querySelectorAll('audio').length,4);
 assert.equal((ui.markup().match(/class="rating"/g)||[]).length,10);
 assert(ui.markup().includes('Contextual acoustic fit'));
@@ -122,4 +126,5 @@ ui=app('examples.html','',hostile);assert(ui.markup().includes('&lt;img'));asser
 // Missing judgments retain five visible unavailable rating slots per output.
 const missing=JSON.parse(JSON.stringify(data));missing.samples[0].judgments={};
 ui=app('examples.html','',missing);assert.equal((ui.markup().match(/class="rating"/g)||[]).length,15);assert(ui.markup().includes('Feedback unavailable'));
+assert(!/\d[\d,]+\s+(?:of|\/)\s+\d[\d,]+/.test(data.benchmarks.a2s.note));
 console.log(JSON.stringify({result:'pass',states,samples:data.samples.length,pages:6,checks:['G-Eval criterion tables','matched/mismatched controls','ten high/low criterion demos and deep links','shared-ID direction switch','dataset/compare views','caption, transcript and ID search','previous/next','mobile selector','single-audio playback','all media paths','five score tiles per output','feedback and prompt markup','escaping and missing data'],limitation:'DOM stand-in; no browser layout, keyboard or audio decoding test'},null,2));
