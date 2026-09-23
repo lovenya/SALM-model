@@ -4,20 +4,6 @@
   if (!data) return;
   const $ = selector => document.querySelector(selector);
   const $$ = selector => [...document.querySelectorAll(selector)];
-  const styles = ['editorial','studio','archive'];
-  function setSiteStyle(name){
-    const chosen=styles.includes(name)?name:'editorial';
-    if(document.documentElement)document.documentElement.dataset.siteStyle=chosen;
-    $$('[data-site-style]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.siteStyle===chosen)));
-    return chosen;
-  }
-  let rememberedStyle;
-  try{rememberedStyle=window.localStorage?.getItem('salm-site-style');}catch(_){}
-  setSiteStyle(document.documentElement?.dataset.siteStyle || rememberedStyle);
-  $$('[data-site-style]').forEach(button=>button.addEventListener('click',()=>{
-    const chosen=setSiteStyle(button.dataset.siteStyle);
-    try{window.localStorage?.setItem('salm-site-style',chosen);}catch(_){}
-  }));
   const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const score = value => Number.isFinite(value) ? value.toFixed(Math.abs(value) >= 10 ? 2 : 3) : '—';
   const metrics = {

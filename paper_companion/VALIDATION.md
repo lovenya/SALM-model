@@ -33,8 +33,8 @@ filesystem paths.
 
 The remaining 400 cascade intermediate fields are listed in
 `missing-data.json`; generated-output transcripts/captions are outside the
-site's scope. The website checkout passed both validators after the three
-light styles and content correction on 2026-09-23. Before these changes, the
+site's scope. The website checkout passed both validators after the final
+light style and content correction on 2026-09-23. Before these changes, the
 user confirmed that deployed examples rendered in Chrome and in Edge after a
-hard reload. Browser layout, style switching, audio decoding and keyboard/touch
+hard reload. Browser layout, audio decoding and keyboard/touch
 behavior need a focused check after the next push.

@@ -16,9 +16,8 @@ shows judge feedback, and the saved exact prompt is a second disclosure.
 Reference audio and speech show their existing dataset caption/transcript.
 Generated outputs are recordings; no transcript or caption is promised for them.
 Only the cascade's intermediate text remains a placeholder. Scene groups are
-not part of the source manifest and are omitted. Editorial, Studio, and Archive
-are three light-only styles selectable from every page; the choice persists in
-the browser.
+not part of the source manifest and are omitted. The site uses one light visual
+style with a white reading surface.
 
 The G-Eval page shows full-test criterion means, a 120-pair matched/mismatched
 diagnostic in each direction, and highest-/lowest-scoring listening examples
