@@ -29,7 +29,7 @@ METRICS = {
         "ours": {
             "root": "s2a/s2a/salm_e2e/ttas/test/s2a_clean_v2_test_ep70_seed1337_steps100",
             "label": "SpeechAudioLM",
-            "detail": "direct · epoch 70",
+            "detail": "direct model",
             "test_count": 1878,
         },
         "cascade": {
@@ -49,7 +49,7 @@ METRICS = {
         "flat": {
             "root": "a2s/a2s/salm_e2e/ttas/test/flat_k2048_ep11_seed1337_steps100",
             "label": "SpeechAudioLM · flat",
-            "detail": "flat · K=2048 · epoch 11",
+            "detail": "flat · K=2048",
             "test_count": 2197,
         },
         "cascade": {
@@ -61,7 +61,7 @@ METRICS = {
     },
 }
 
-SAMPLE_METRICS = ("utmos", "dnsmos", "target_caption_clap_score")
+SAMPLE_METRICS = ("utmos", "dnsmos")
 CRITERION_ORDER = {
     "a2s": ("target_modality_success", "perceptual_audio_quality", "scenario_plausibility", "controlled_detail", "expressive_delivery_fit"),
     "s2a": ("target_modality_success", "perceptual_audio_quality", "scenario_plausibility", "controlled_detail", "contextual_acoustic_fit"),
@@ -225,7 +225,7 @@ def criterion_means(rows: dict[str, dict], direction: str) -> dict[str, dict]:
                   if isinstance(row.get("criteria", {}).get(name, {}).get("score"), (int, float))]
         if not values:
             raise ValueError(f"No {direction} scores for criterion {name}")
-        means[name] = {"mean": sum(values) / len(values), "count": len(values)}
+        means[name] = {"mean": sum(values) / len(values)}
     return means
 
 
@@ -249,7 +249,7 @@ def collect_ground_truth(eval_repo: Path, results: Path, direction: str, test_id
     return {
         "id": "ground_truth", "name": "Ground truth", "detail": "paired test recording",
         "mean": sum(row["score"] for row in rows.values()) / len(rows),
-        "count": len(rows), "criteria": criterion_means(rows, direction),
+        "criteria": criterion_means(rows, direction),
     }
 
 
@@ -272,7 +272,7 @@ def collect_mismatch(review_path: Path) -> dict:
                 if any(not isinstance(value, (int, float)) or not 1 <= value <= 5 for value in values):
                     raise ValueError(f"Invalid mismatch score: {direction}/{variant}/{criterion}")
                 scores[variant][criterion] = sum(values) / len(values)
-        output[direction] = {"count": len(cases), "scores": scores}
+        output[direction] = {"scores": scores}
     return output
 
 
@@ -332,7 +332,7 @@ def build(args: argparse.Namespace) -> None:
         test_ids = clean_test_ids(args.eval_repo, direction)
         if not publish_ids <= test_ids:
             raise ValueError(f"Selected IDs outside {direction} test split")
-        metric_ids = ("fad", "kad", "inception_score", "kl_passt", "target_caption_clap_score") if direction == "s2a" else ("utmos", "dnsmos")
+        metric_ids = ("fad", "kad", "inception_score") if direction == "s2a" else ("utmos", "dnsmos")
         output_systems = []
         geval_systems = [collect_ground_truth(args.eval_repo, args.results, direction, test_ids)]
         for system, spec in systems.items():
@@ -344,38 +344,33 @@ def build(args: argparse.Namespace) -> None:
             judgments[(direction, system)] = geval_rows
             geval_systems.append({
                 "id": system, "name": spec["label"], "detail": spec["detail"],
-                "mean": geval, "count": geval_count,
+                "mean": geval,
                 "criteria": criterion_means(geval_rows, direction),
             })
             scores = {"geval_audio_plausibility": geval}
-            counts = {"geval_audio_plausibility": geval_count}
-            attempted = {"geval_audio_plausibility": geval_attempted}
             for metric in metric_ids:
                 result = collect_scalar_metric(root, metric)
                 if result:
-                    value, count, values = result
-                    scores[metric], counts[metric] = value, count
+                    value, _, values = result
+                    scores[metric] = value
                     per_sample[(direction, system, metric)] = values
-            output_systems.append({"id": system, "name": spec["label"], "detail": spec["detail"], "scores": scores, "counts": counts, "attempted": attempted})
-        metric_meta = {metric: {"scope": "corpus" if metric in {"fad", "kad", "inception_score", "kl_passt"} else "mean"} for metric in metric_ids}
+            output_systems.append({"id": system, "name": spec["label"], "detail": spec["detail"], "scores": scores})
+        metric_meta = {metric: {"scope": "corpus" if metric in {"fad", "kad", "inception_score"} else "mean"} for metric in metric_ids}
         metric_meta["geval_audio_plausibility"] = {"scope": "mean · 1–5"}
         data["benchmarks"][direction] = {
             "directionName": "speech-to-audio" if direction == "s2a" else "audio-to-speech",
-            "testCount": systems["ours"]["test_count"],
-            "note": "Corpus metrics have no per-example value." if direction == "s2a" else "The cascade completed 2,164 of 2,197 rows; its UTMOS and DNSMOS means use successful rows.",
+            "note": "Corpus metrics have no per-example value." if direction == "s2a" else "Cascade UTMOS and DNSMOS means use the successfully scored outputs.",
             "metrics": metric_meta,
             "systems": output_systems,
         }
-        data["geval"]["summary"][direction] = {
-            "testCount": len(test_ids), "systems": geval_systems,
-        }
+        data["geval"]["summary"][direction] = {"systems": geval_systems}
 
     out.mkdir(parents=True)
     for source in TEMPLATE.iterdir():
         if source.suffix in {".html", ".css", ".js"} and source.name != "site-data.js":
             shutil.copy2(source, out / source.name)
     for row in selected:
-        item = {key: row[key] for key in ("sample_index", "sample_id", "speaker_gender", "speaker_emotion", "emotion_group", "scene_group", "audio_caption", "speech_text")}
+        item = {key: row[key] for key in ("sample_index", "sample_id", "speaker_gender", "speaker_emotion", "audio_caption", "speech_text")}
         item["reasoning"] = reasons[row["sample_id"]]
         item["files"], item["judgments"], item["scores"] = {}, {"a2s": {}, "s2a": {}}, {"a2s": {}, "s2a": {}}
         supplement = supplements.get(row["sample_id"], {})
@@ -421,13 +416,8 @@ def build(args: argparse.Namespace) -> None:
         "examples": len(selected),
         "audio_files": sum(len(row["files"]) for row in selected),
         "selection": "first N rows of the fixed, curated seed-20260917 100-pair bundle",
-        "aggregate_scope": {"a2s": 2197, "s2a": 1878},
         "geval_prompt_version": "geval_audio_plausibility_v6",
         "missing_fields": len(missing),
-        "judgment_coverage": {
-            f"{direction}/{system}": sum(system in item["judgments"][direction] for item in data["samples"])
-            for direction in METRICS for system in METRICS[direction]
-        },
     }
     (out / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps({"output": str(out), **manifest}, indent=2))

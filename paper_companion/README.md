@@ -9,11 +9,12 @@ deliberately empty; publish a built release, not this template.
 The site has a paper-title homepage, Dataset, G-Eval Audio, Results, Model, and
 Examples pages. The Model architecture content is deferred. The Examples page
 uses 100 common clean-v2 test IDs, seven recordings per ID, both reference
-texts, dataset pairing rationale, optional speaker metadata, and a direction
-switch. Direct and cascade systems appear in readable vertical rows. Each
-generated output shows all five v6 criterion scores. Opening a criterion shows
-judge feedback; the saved exact prompt is a second disclosure. Cascade stage
-text and generated-output descriptions remain explicit placeholders.
+texts, dataset pairing rationale, speaker metadata, and a direction switch.
+Direct and cascade systems appear side by side on wide screens. Each generated
+output shows all five v6 criterion scores as compact blocks; opening a score
+shows judge feedback, and the saved exact prompt is a second disclosure.
+Cascade stage text and generated-output descriptions remain explicit
+placeholders. Scene groups are not part of the source manifest and are omitted.
 
 The G-Eval page shows full-test criterion means, a 120-pair matched/mismatched
 diagnostic in each direction, and highest-/lowest-scoring listening examples
@@ -37,7 +38,9 @@ UV_CACHE_DIR=/tmp/salm-site-uv-cache uv run --no-project --offline \
   --output /scratch/lovenya/salm_model_outputs/paper_companion_next
 ```
 
-The exporter reads the curated 100-pair bundle, exact clean-v2 manifests,
+The dataset page documents AudioCaps pairing construction, direction-specific
+G-Eval Audio cleaning, and the Qwen3-Omni-30B-A3B-Instruct judge. The exporter
+reads the curated 100-pair bundle, exact clean-v2 manifests,
 completed system evaluations, v6 prompt ledgers, and saved mismatch review. It
 does not run models or recalculate scores. A fresh score release should update
 all G-Eval sources together and their displayed version label; do not mix v6

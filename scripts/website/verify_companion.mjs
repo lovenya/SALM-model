@@ -100,11 +100,6 @@ assert(ui.markup().includes('No matching examples'));
 assert.equal(ui.document.querySelectorAll('audio').length,0);
 ui.fire('#reset-search');
 assert(ui.markup().includes('TEST PAIR'));
-for(const scene of [...new Set(data.samples.map(s=>s.scene_group))]){
- ui.fire('#scene-filter','change',scene);
- const id=new URLSearchParams(ui.context.location.search).get('sample');
- assert.equal(data.samples.find(s=>s.sample_id===id).scene_group,scene);
-}
 ui.fire('#reset-search');
 ui.fire('#mobile-sample','change',data.samples[99].sample_id);
 assert.equal(new URLSearchParams(ui.context.location.search).get('sample'),data.samples[99].sample_id);
@@ -127,4 +122,4 @@ ui=app('examples.html','',hostile);assert(ui.markup().includes('&lt;img'));asser
 // Missing judgments retain five visible unavailable rating slots per output.
 const missing=JSON.parse(JSON.stringify(data));missing.samples[0].judgments={};
 ui=app('examples.html','',missing);assert.equal((ui.markup().match(/class="rating"/g)||[]).length,15);assert(ui.markup().includes('Feedback unavailable'));
-console.log(JSON.stringify({result:'pass',states,samples:data.samples.length,pages:6,checks:['G-Eval criterion tables','matched/mismatched controls','ten high/low criterion demos and deep links','shared-ID direction switch','dataset/compare views','filters and empty state','previous/next','mobile selector','single-audio playback','all media paths','five visible rating slots','feedback and prompt markup','escaping and missing data'],limitation:'DOM stand-in; no browser layout, keyboard or audio decoding test'},null,2));
+console.log(JSON.stringify({result:'pass',states,samples:data.samples.length,pages:6,checks:['G-Eval criterion tables','matched/mismatched controls','ten high/low criterion demos and deep links','shared-ID direction switch','dataset/compare views','caption, transcript and ID search','previous/next','mobile selector','single-audio playback','all media paths','five score tiles per output','feedback and prompt markup','escaping and missing data'],limitation:'DOM stand-in; no browser layout, keyboard or audio decoding test'},null,2));

@@ -23,8 +23,9 @@ exact direction-specific clean-v2 test manifests.
 Every one of the 500 generated-output judgments has five integer scores,
 feedback and an exact v6 prompt: 2,500 prompts total. Per-example means equal
 the five scores. Full-test aggregate tables have the expected systems and
-sample coverage; each matched/mismatched diagnostic contains 120 paired
-cases per direction. The DOM stand-in checks ten criterion demos, 20 example
+criterion means; each matched/mismatched diagnostic contains 120 paired
+cases per direction. Per-system coverage counts are not shown in result tables.
+The DOM stand-in checks ten criterion demos, 20 example
 links, all 40 demo audio paths, the criterion tables, and 400 sample/direction/
 view states. It also exercises filters, direction switching, disclosures,
 missing-score fallback and HTML escaping. Public data has no private absolute
@@ -35,3 +36,8 @@ intermediates and 500 output transcripts/captions. Browser layout, real audio
 decoding and keyboard/touch behavior have not been tested in a browser because
 none is installed here. The public URL could not be fetched from this cluster;
 review the deployed site after pushing the website commit.
+
+The interface and published-data schema were revised after the validation
+above: system coverage counts and derived scene-group fields were removed,
+metrics were hidden as requested, and system cards were rearranged. Those
+latest display changes have not been rerun through the validators.

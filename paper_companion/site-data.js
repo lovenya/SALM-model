@@ -3,12 +3,12 @@ window.PAPER_DATA = {
   release: false,
   benchmarks: {
     s2a: {directionName:'speech-to-audio',testCount:1878,note:'Build the release to load measured results.',systems:[
-      {id:'ours',name:'SpeechAudioLM',detail:'direct · epoch 70',scores:{}},
+      {id:'ours',name:'SpeechAudioLM',detail:'direct model',scores:{}},
       {id:'cascade',name:'Text cascade',detail:'ASR → LLM → Audio-Omni',scores:{}}
     ]},
     a2s: {directionName:'audio-to-speech',testCount:2197,note:'Build the release to load measured results.',systems:[
-      {id:'ours',name:'SpeechAudioLM · hierarchical',detail:'K=2048 · epoch 12',scores:{}},
-      {id:'flat',name:'SpeechAudioLM · flat',detail:'K=2048 · epoch 11',scores:{}},
+      {id:'ours',name:'SpeechAudioLM · hierarchical',detail:'hierarchical · K=2048',scores:{}},
+      {id:'flat',name:'SpeechAudioLM · flat',detail:'flat · K=2048',scores:{}},
       {id:'cascade',name:'Text cascade',detail:'captioner → LLM → CosyVoice3',scores:{}}
     ]}
   },

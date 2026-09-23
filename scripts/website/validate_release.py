@@ -71,24 +71,24 @@ def main():
         rationales[direction] = {Path(row['audio_file']).stem: row['reasoning'] for row in map(json.loads, manifest_path.read_text().splitlines())}
     geval = data['geval']
     assert geval['promptVersion'] == manifest['geval_prompt_version'] == 'geval_audio_plausibility_v6'
-    for direction, expected_count, system_ids in (('a2s', 2197, {'ground_truth','ours','flat','cascade'}), ('s2a', 1878, {'ground_truth','ours','cascade'})):
+    for direction, system_ids in (('a2s', {'ground_truth','ours','flat','cascade'}), ('s2a', {'ground_truth','ours','cascade'})):
         block = geval['summary'][direction]
-        assert block['testCount'] == expected_count
+        assert 'testCount' not in block
         assert {system['id'] for system in block['systems']} == system_ids
         for system in block['systems']:
-            assert 0 < system['count'] <= expected_count
+            assert 'count' not in system
             assert 1 <= system['mean'] <= 5
             assert set(system['criteria']) == set(geval['criterionOrder'][direction])
             for criterion in system['criteria'].values():
-                assert 0 < criterion['count'] <= system['count']
+                assert 'count' not in criterion
                 assert 1 <= criterion['mean'] <= 5
-        assert block['systems'][0]['count'] == expected_count
         mismatch = geval['matchedMismatch'][direction]
-        assert mismatch['count'] == 120
+        assert 'count' not in mismatch
         for variant in ('matched', 'mismatched'):
             assert set(mismatch['scores'][variant]) == set(geval['criterionOrder'][direction])
             assert all(1 <= value <= 5 for value in mismatch['scores'][variant].values())
         assert mismatch['scores']['matched']['scenario_plausibility'] > mismatch['scores']['mismatched']['scenario_plausibility']
+    assert all('counts' not in system and 'attempted' not in system for block in data['benchmarks'].values() for system in block['systems'])
     recordings, prompts, judgments, rates = set(), 0, 0, Counter()
     expected_systems = {'a2s': {'ours', 'flat', 'cascade'}, 's2a': {'ours', 'cascade'}}
     for sample in samples:
@@ -97,6 +97,8 @@ def main():
             assert sample[field] == original[field], (sample['sample_id'], field)
         assert sample['reasoning'].strip() == rationales['a2s'][sample['sample_id']] == rationales['s2a'][sample['sample_id']]
         assert len(sample['files']) == 7
+        assert 'scene_group' not in sample and 'emotion_group' not in sample
+        assert 'counts' not in data['benchmarks']['a2s']['systems'][0]
         for key, relative in sample['files'].items():
             media = (root / relative).resolve()
             assert media.is_relative_to(root) and media.is_file(), media
