@@ -35,7 +35,7 @@ METRICS = {
         "cascade": {
             "root": "s2a/t2a/cascaded/ttas/test/20260618_1211",
             "label": "Text cascade",
-            "detail": "ASR → LLM → Audio-Omni",
+            "detail": "Whisper large-v3 → Llama 3.3 70B Instruct → Audio-Omni",
             "test_count": 1878,
         },
     },
@@ -55,7 +55,7 @@ METRICS = {
         "cascade": {
             "root": "a2s/t2s/cascaded/ttas/test/20260618_1211",
             "label": "Text cascade",
-            "detail": "captioner → LLM → CosyVoice",
+            "detail": "AF-Next (Audio Flamingo 3) → Llama 3.3 70B Instruct → CosyVoice 3",
             "test_count": 2197,
         },
     },
@@ -296,7 +296,9 @@ def build(args: argparse.Namespace) -> None:
             sample_id = row["sample_id"]
             if sample_id not in publish_ids or sample_id in supplements:
                 raise ValueError(f"Unknown or duplicate supplement ID: {sample_id}")
-            for group, fields in (("cascadeStages", {"a2s": {"perception", "bridge"}, "s2a": {"perception", "bridge"}}), ("outputText", {d: set(s) for d, s in METRICS.items()})):
+            if set(row) - {"sample_id", "cascadeStages"}:
+                raise ValueError(f"Unknown supplement fields for {sample_id}")
+            for group, fields in (("cascadeStages", {"a2s": {"perception", "bridge"}, "s2a": {"perception", "bridge"}}),):
                 content = row.get(group, {})
                 if not isinstance(content, dict) or set(content) - set(fields):
                     raise ValueError(f"Invalid {group} directions for {sample_id}")
@@ -375,7 +377,6 @@ def build(args: argparse.Namespace) -> None:
         item["files"], item["judgments"], item["scores"] = {}, {"a2s": {}, "s2a": {}}, {"a2s": {}, "s2a": {}}
         supplement = supplements.get(row["sample_id"], {})
         item["cascadeStages"] = supplement.get("cascadeStages", {})
-        item["outputText"] = supplement.get("outputText", {})
         media_dir = out / "media" / row["sample_id"]
         media_dir.mkdir(parents=True)
         for key, relative in row["files"].items():
@@ -403,8 +404,6 @@ def build(args: argparse.Namespace) -> None:
                 if not item["cascadeStages"].get(direction, {}).get(field):
                     missing.append({"sample_id": item["sample_id"], "direction": direction, "field": f"cascadeStages.{direction}.{field}"})
             for system in METRICS[direction]:
-                if not item["outputText"].get(direction, {}).get(system):
-                    missing.append({"sample_id": item["sample_id"], "direction": direction, "field": f"outputText.{direction}.{system}"})
                 judgment = item["judgments"][direction].get(system, {})
                 for criterion in data["geval"]["criterionOrder"][direction]:
                     value = judgment.get("criteria", {}).get(criterion, {})
@@ -427,7 +426,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--examples", type=int, default=100)
-    parser.add_argument("--supplements", type=Path, help="Optional per-ID cascade stages and generated-output text JSONL")
+    parser.add_argument("--supplements", type=Path, help="Optional per-ID cascade stage text JSONL")
     parser.add_argument("--survey", type=Path, default=DEFAULT_SURVEY)
     parser.add_argument("--evals", type=Path, default=DEFAULT_EVALS)
     parser.add_argument("--eval-repo", type=Path, default=DEFAULT_EVAL_REPO)

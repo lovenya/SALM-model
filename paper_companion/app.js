@@ -4,6 +4,20 @@
   if (!data) return;
   const $ = selector => document.querySelector(selector);
   const $$ = selector => [...document.querySelectorAll(selector)];
+  const styles = ['editorial','studio','archive'];
+  function setSiteStyle(name){
+    const chosen=styles.includes(name)?name:'editorial';
+    if(document.documentElement)document.documentElement.dataset.siteStyle=chosen;
+    $$('[data-site-style]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.siteStyle===chosen)));
+    return chosen;
+  }
+  let rememberedStyle;
+  try{rememberedStyle=window.localStorage?.getItem('salm-site-style');}catch(_){}
+  setSiteStyle(document.documentElement?.dataset.siteStyle || rememberedStyle);
+  $$('[data-site-style]').forEach(button=>button.addEventListener('click',()=>{
+    const chosen=setSiteStyle(button.dataset.siteStyle);
+    try{window.localStorage?.setItem('salm-site-style',chosen);}catch(_){}
+  }));
   const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const score = value => Number.isFinite(value) ? value.toFixed(Math.abs(value) >= 10 ? 2 : 3) : '—';
   const metrics = {
@@ -93,15 +107,14 @@
     }).join('')}</div>`;
   }
   function stage(label,value){return `<li><strong>${label}</strong><p${value?'':' class="missing"'}>${escape(value || 'Awaiting saved stage output.')}</p></li>`;}
-  function cascade(sample){const stages=sample.cascadeStages?.[direction]||{},a2s=direction==='a2s';return `<details class="stage-trace"><summary>Follow the cascade <span aria-hidden="true">↗</span></summary><ol>${stage(a2s?'Audio → caption':'Speech → transcript (ASR)',stages.perception)}${stage(a2s?'Caption → speech text (LLM)':'Transcript → audio caption (LLM)',stages.bridge)}<li><strong>${a2s?'Speech text → speech (CosyVoice3)':'Audio caption → audio (Audio-Omni)'}</strong><p>Final recording is playable above.</p></li></ol><p class="quiet">These are generation stages. Dataset reference text is not a substitute for missing stage outputs; TTS input text is not a verified output transcript.</p></details>`;}
+  function cascade(sample){const stages=sample.cascadeStages?.[direction]||{},a2s=direction==='a2s';return `<details class="stage-trace"><summary>Follow the cascade <span aria-hidden="true">↗</span></summary><ol>${stage(a2s?'Audio → caption · AF-Next (Audio Flamingo 3)':'Speech → transcript · Whisper large-v3',stages.perception)}${stage(a2s?'Caption → utterance · Llama 3.3 70B Instruct':'Transcript → scene description · Llama 3.3 70B Instruct',stages.bridge)}<li><strong>${a2s?'Utterance → speech · CosyVoice 3':'Scene description → audio · Audio-Omni'}</strong><p>Final recording is playable above.</p></li></ol><p class="quiet">These are generation stages. The paired reference caption and transcript do not stand in for missing cascade intermediate text.</p></details>`;}
   function output(sample,system){
     const a2s=direction==='a2s',spec=data.benchmarks[direction].systems.find(s=>s.id===system),files=sample.files;
     const src=system==='cascade'?(a2s?files.a2s_cascaded:files.s2a_cascaded):system==='flat'?files.a2s_model_a:(a2s?files.a2s_model_b:files.s2a_ours);
     const judgment=sample.judgments?.[direction]?.[system];
     const label=spec?.name || (system==='cascade'?'Text cascade':'SpeechAudioLM');
-    const text=sample.outputText?.[direction]?.[system];
     const values=sample.scores?.[direction]?.[system]||{};
-    return `<article class="system-output" data-system="${system}"><header><span class="small-label">${system==='cascade'?'CASCADE':'DIRECT MODEL'}</span><h3>${escape(label)}</h3><p class="system-detail">${escape(spec?.detail)}</p></header>${audio(`${label} output for ${sample.sample_id}`,src)}<div class="judgment-heading"><span>G-Eval Audio <small>v6</small></span><strong>${score(judgment?.score)} <small>mean / 5</small></strong></div>${ratingRows(judgment,system)}<p class="rating-instruction">Open a criterion block to read its feedback.</p>${Object.keys(values).length?`<div class="individual-metrics">${Object.entries(values).map(([key,value])=>`<div>${metricTip(key)}<strong>${score(value)}</strong></div>`).join('')}</div>`:''}${system==='cascade'?cascade(sample):''}<details class="generated-text"><summary>${a2s?'Output transcript':'Output audio caption'}</summary><p${text?'':' class="missing"'}>${escape(text || 'Awaiting a transcript/caption of this generated recording.')}</p></details></article>`;
+    return `<article class="system-output" data-system="${system}"><header><span class="small-label">${system==='cascade'?'CASCADE':'DIRECT MODEL'}</span><h3>${escape(label)}</h3><p class="system-detail">${escape(spec?.detail)}</p></header>${audio(`${label} output for ${sample.sample_id}`,src)}<div class="judgment-heading"><span>G-Eval Audio <small>v6</small></span><strong>${score(judgment?.score)} <small>mean / 5</small></strong></div>${ratingRows(judgment,system)}<p class="rating-instruction">Open a criterion block to read its feedback.</p>${Object.keys(values).length?`<div class="individual-metrics">${Object.entries(values).map(([key,value])=>`<div>${metricTip(key)}<strong>${score(value)}</strong></div>`).join('')}</div>`:''}${system==='cascade'?cascade(sample):''}</article>`;
   }
   function pairRecording(sample,isInput){
     const environmental=(direction==='a2s')===isInput;

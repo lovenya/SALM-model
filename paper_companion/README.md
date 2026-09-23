@@ -13,8 +13,12 @@ texts, dataset pairing rationale, speaker metadata, and a direction switch.
 Direct and cascade systems appear side by side on wide screens. Each generated
 output shows all five v6 criterion scores as compact blocks; opening a score
 shows judge feedback, and the saved exact prompt is a second disclosure.
-Cascade stage text and generated-output descriptions remain explicit
-placeholders. Scene groups are not part of the source manifest and are omitted.
+Reference audio and speech show their existing dataset caption/transcript.
+Generated outputs are recordings; no transcript or caption is promised for them.
+Only the cascade's intermediate text remains a placeholder. Scene groups are
+not part of the source manifest and are omitted. Editorial, Studio, and Archive
+are three light-only styles selectable from every page; the choice persists in
+the browser.
 
 The G-Eval page shows full-test criterion means, a 120-pair matched/mismatched
 diagnostic in each direction, and highest-/lowest-scoring listening examples
@@ -25,11 +29,13 @@ validation of the judge. Objective metrics are on the Results page.
 
 ## Rebuild
 
-The current validated release is
+The validated website checkout is `/scratch/lovenya/speechaudiolm-paper/`.
+Its source media release is
 `/scratch/lovenya/salm_model_outputs/paper_companion_100_geval_20260923/`.
-It contains 100 shared IDs, 700 source-identical WAVs, 500 generated-output
-judgments, 2,500 exact prompts, and `missing-data.json`. Rebuild to a new
-directory so earlier releases remain available:
+The checkout contains 100 shared IDs, 700 source-identical WAVs, 500
+generated-output judgments, 2,500 exact prompts, and `missing-data.json`.
+The source media release predates the style and schema revisions, so rebuild
+to a new directory to reproduce the current source without altering it:
 
 ```bash
 UV_CACHE_DIR=/tmp/salm-site-uv-cache uv run --no-project --offline \
@@ -46,13 +52,12 @@ does not run models or recalculate scores. A fresh score release should update
 all G-Eval sources together and their displayed version label; do not mix v6
 criterion results with the draft paper's newer provisional numbers.
 
-To fill missing text, supply one JSONL row per selected `sample_id` via
-`--supplements`. Use `supplements.example.jsonl` as the schema. The current
-receipt has 400 missing cascade-stage text fields and 500 generated-output
-transcript/caption fields. No evaluation scores, feedback, prompts, or audio
-are missing. The builder rejects unknown IDs, duplicate IDs and invalid
-fields. Reference captions/transcripts are never substituted for missing
-generation-stage results.
+To fill cascade intermediate text, supply one JSONL row per selected
+`sample_id` via `--supplements`. Use `supplements.example.jsonl` as the schema.
+The current receipt has 400 missing cascade-stage text fields. No evaluation
+scores, feedback, prompts, or audio are missing. The builder rejects unknown
+IDs, duplicate IDs and invalid fields. Reference captions/transcripts are
+never substituted for missing generation-stage results.
 
 Run the validations in [VALIDATION.md](VALIDATION.md) before copying the release
 to the website repository. The website repo, not this training repo, holds the

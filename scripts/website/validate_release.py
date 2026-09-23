@@ -97,8 +97,8 @@ def main():
             assert sample[field] == original[field], (sample['sample_id'], field)
         assert sample['reasoning'].strip() == rationales['a2s'][sample['sample_id']] == rationales['s2a'][sample['sample_id']]
         assert len(sample['files']) == 7
+        assert 'outputText' not in sample
         assert 'scene_group' not in sample and 'emotion_group' not in sample
-        assert 'counts' not in data['benchmarks']['a2s']['systems'][0]
         for key, relative in sample['files'].items():
             media = (root / relative).resolve()
             assert media.is_relative_to(root) and media.is_file(), media
@@ -132,6 +132,8 @@ def main():
             assert target.is_relative_to(root) and target.is_file(), (page, link)
     missing = json.loads((root / 'missing-data.json').read_text())
     assert len(missing) == manifest['missing_fields']
+    assert len(missing) == 4 * len(samples)
+    assert all(row['field'].startswith('cascadeStages.') for row in missing)
     assert all(not row['field'].startswith('judgments.') for row in missing), 'Missing evaluation evidence'
     print(json.dumps({'result':'pass','pages':len(pages),'matched_ids':len(samples),'identical_source_wavs':len(recordings),'sample_rates':dict(rates),'judgments':judgments,'exact_prompts':prompts,'missing_fields':Counter(row['field'] for row in missing),'total_bytes':sum(p.stat().st_size for p in root.rglob('*') if p.is_file())}, indent=2))
 

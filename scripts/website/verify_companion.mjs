@@ -30,7 +30,7 @@ class Element{
  closest(){return null;}
 }
 class Document{
- constructor(html){this.nodes=parse(html,this);this.handlers={};}
+ constructor(html){this.nodes=parse(html,this);this.handlers={};this.documentElement={dataset:{}};}
  all(){const visit=node=>[node,...node.children.flatMap(visit)];return this.nodes.flatMap(visit);}
  querySelectorAll(selector){return this.all().filter(node=>{
   if(selector.startsWith('#'))return node.attrs.id===selector.slice(1);
@@ -41,16 +41,26 @@ class Document{
  querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
  addEventListener(type,fn){this.handlers[type]=fn;}
 }
+const storedStyle={};
+const localStorage={getItem:key=>storedStyle[key]||null,setItem:(key,value)=>{storedStyle[key]=value;}};
 function app(page,query='',inputData=data){
  const document=new Document(fs.readFileSync(path.join(release,page),'utf8'));
  const location={search:query};
- const context={document,window:{PAPER_DATA:inputData,addEventListener(){}},URLSearchParams,location,history:{replaceState(_,__,url){location.search=url;}},console};
+ const context={document,window:{PAPER_DATA:inputData,localStorage,addEventListener(){}},URLSearchParams,location,history:{replaceState(_,__,url){location.search=url;}},console};
  vm.runInNewContext(script,context,{filename:'app.js'});
  const get=selector=>{const el=document.querySelector(selector);assert(el,selector);return el;};
  const fire=(selector,type='click',value)=>{const el=get(selector);if(value!==undefined)el.value=value;assert(el.handlers[type],`${selector} handles ${type}`);el.handlers[type]({target:el});};
  return {document,context,get,fire,markup:()=>get('#selected-example').innerHTML};
 }
-for(const page of ['index.html','dataset.html','geval.html','results.html','model.html'])app(page);
+for(const page of ['index.html','dataset.html','geval.html','results.html','model.html']){
+ const themed=app(page);
+ assert.equal(themed.document.querySelectorAll('[data-site-style]').length,3);
+ themed.fire('[data-site-style="studio"]');
+ assert.equal(themed.get('[data-site-style="studio"]').attrs['aria-pressed'],'true');
+ themed.fire('[data-site-style="archive"]');
+ assert.equal(themed.get('[data-site-style="archive"]').attrs['aria-pressed'],'true');
+}
+assert.equal(app('examples.html').document.documentElement.dataset.siteStyle,'archive');
 const gevalPage=app('geval.html');
 for(const direction of ['a2s','s2a']){
  const table=gevalPage.get(`#geval-summary-${direction}`).innerHTML;
@@ -77,6 +87,9 @@ assert.equal((ui.markup().match(/class="rating"/g)||[]).length,15);
 assert.equal((ui.markup().match(/class="verdict"/g)||[]).length,15);
 assert.equal((ui.markup().match(/class="prompt"/g)||[]).length,15);
 assert(!/undefined|NaN/.test(ui.markup()));
+assert(!ui.markup().includes('Output transcript')&&!ui.markup().includes('Output audio caption'));
+assert(ui.markup().includes('AF-Next (Audio Flamingo 3)'));
+assert(ui.markup().includes('Llama 3.3 70B Instruct'));
 assert(decode(ui.markup()).includes(`<h2>${data.samples[0].audio_caption}</h2>`));
 assert(decode(ui.get('#sample-list').innerHTML).includes(`<strong>${data.samples[0].audio_caption}</strong>`));
 const initial=new URLSearchParams(ui.context.location.search).get('sample');
@@ -88,6 +101,7 @@ assert.equal(ui.document.querySelectorAll('audio').length,4);
 assert.equal((ui.markup().match(/class="rating"/g)||[]).length,10);
 assert(ui.markup().includes('Contextual acoustic fit'));
 assert(!ui.markup().includes('Expressive delivery'));
+assert(ui.markup().includes('Whisper large-v3'));
 ui.fire('[data-view="pair"]');
 assert.equal(ui.document.querySelectorAll('audio').length,2);
 assert(!ui.markup().includes('class="rating"'));
@@ -111,6 +125,7 @@ const audios=ui.document.querySelectorAll('audio');audios.forEach(a=>a.paused=fa
 // Exercise every sample, direction and view, checking all output paths and criteria.
 let states=0;
 for(const sample of data.samples){
+ assert(!Object.hasOwn(sample,'outputText'));
  for(const direction of ['a2s','s2a']){
   ui=app('examples.html',`?direction=${direction}&sample=${encodeURIComponent(sample.sample_id)}`);
   assert.equal(new URLSearchParams(ui.context.location.search).get('sample'),sample.sample_id);

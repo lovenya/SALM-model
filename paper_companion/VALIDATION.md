@@ -1,17 +1,17 @@
 # Validation — 2026-09-23
 
-Release: `/scratch/lovenya/salm_model_outputs/paper_companion_100_geval_20260923/`.
+Validated checkout: `/scratch/lovenya/speechaudiolm-paper/`.
 
 Run from `/scratch/lovenya/SALM-model`:
 
 ```bash
 node --check paper_companion/app.js
 node scripts/website/verify_companion.mjs \
-  /scratch/lovenya/salm_model_outputs/paper_companion_100_geval_20260923
+  /scratch/lovenya/speechaudiolm-paper
 UV_CACHE_DIR=/tmp/salm-site-uv-cache uv run --no-project --offline \
   --python /scratch/lovenya/salm_migration_clean/.venvs/salm-model/salm-train-audioldm-py312/bin/python \
   scripts/website/validate_release.py \
-  /scratch/lovenya/salm_model_outputs/paper_companion_100_geval_20260923
+  /scratch/lovenya/speechaudiolm-paper
 ```
 
 Both validators pass. The release has six linked HTML pages, 100 unique common
@@ -31,12 +31,10 @@ view states. It also exercises filters, direction switching, disclosures,
 missing-score fallback and HTML escaping. Public data has no private absolute
 filesystem paths.
 
-The remaining 900 text fields are listed in `missing-data.json`: 400 cascade
-intermediates and 500 output transcripts/captions. The website checkout at
-`/scratch/lovenya/speechaudiolm-paper` passed both validators after the latest
-display changes on 2026-09-23. The public HTML and both JavaScript files were
-fetched successfully and matched the committed local files; the public site
-was not exercised in a browser here. The user confirmed that the deployed
-examples render in Chrome and in Edge after a hard reload. Browser layout,
-audio decoding and keyboard/touch behavior still need a focused check after
-the next push.
+The remaining 400 cascade intermediate fields are listed in
+`missing-data.json`; generated-output transcripts/captions are outside the
+site's scope. The website checkout passed both validators after the three
+light styles and content correction on 2026-09-23. Before these changes, the
+user confirmed that deployed examples rendered in Chrome and in Edge after a
+hard reload. Browser layout, style switching, audio decoding and keyboard/touch
+behavior need a focused check after the next push.
