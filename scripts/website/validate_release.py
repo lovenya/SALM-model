@@ -8,6 +8,7 @@ from html.parser import HTMLParser
 import json
 from pathlib import Path
 import struct
+import xml.etree.ElementTree as ET
 
 class Page(HTMLParser):
     def __init__(self):
@@ -17,7 +18,7 @@ class Page(HTMLParser):
         attrs = dict(attrs)
         if 'id' in attrs:
             self.ids.append(attrs['id'])
-        if tag in {'a', 'script', 'link'}:
+        if tag in {'a', 'script', 'link', 'img'}:
             value = attrs.get('src', attrs.get('href', ''))
             if value and not value.startswith(('https:', 'http:', 'mailto:', '#')):
                 self.links.append(value.split('?')[0].split('#')[0])
@@ -130,12 +131,25 @@ def main():
         for link in parsed.links:
             target = (page.parent / link).resolve()
             assert target.is_relative_to(root) and target.is_file(), (page, link)
+    figures = json.loads((root / 'figures/manifest.json').read_text())['figures']
+    assert {figure['id'] for figure in figures} == {'generation', 'training', 'content-lm'}
+    for figure in figures:
+        assert {Path(f['name']).suffix for f in figure['files']} == {'.svg', '.pdf', '.png'}
+        for artifact in figure['files']:
+            target = (root / 'figures' / artifact['name']).resolve()
+            assert target.is_relative_to(root / 'figures'), target
+            assert target.stat().st_size == artifact['bytes'] and digest(target) == artifact['sha256'], target
+        svg = ET.parse(root / 'figures' / (figure['id'] + '.svg')).getroot()
+        assert svg.attrib['viewBox'] == f"0 0 {figure['width']} {figure['height']}"
+        assert svg.find('{http://www.w3.org/2000/svg}title').text
+        assert svg.find('{http://www.w3.org/2000/svg}desc').text
+        assert not list(svg.iter('{http://www.w3.org/2000/svg}image')), 'Figures must remain vector'
     missing = json.loads((root / 'missing-data.json').read_text())
     assert len(missing) == manifest['missing_fields']
     assert len(missing) == 4 * len(samples)
     assert all(row['field'].startswith('cascadeStages.') for row in missing)
     assert all(not row['field'].startswith('judgments.') for row in missing), 'Missing evaluation evidence'
-    print(json.dumps({'result':'pass','pages':len(pages),'matched_ids':len(samples),'identical_source_wavs':len(recordings),'sample_rates':dict(rates),'judgments':judgments,'exact_prompts':prompts,'missing_fields':Counter(row['field'] for row in missing),'total_bytes':sum(p.stat().st_size for p in root.rglob('*') if p.is_file())}, indent=2))
+    print(json.dumps({'result':'pass','pages':len(pages),'architecture_figures':len(figures),'matched_ids':len(samples),'identical_source_wavs':len(recordings),'sample_rates':dict(rates),'judgments':judgments,'exact_prompts':prompts,'missing_fields':Counter(row['field'] for row in missing),'total_bytes':sum(p.stat().st_size for p in root.rglob('*') if p.is_file())}, indent=2))
 
 if __name__ == '__main__':
     main()

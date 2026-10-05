@@ -1,4 +1,4 @@
-# Validation — 2026-09-23
+# Validation — 2026-10-05
 
 Validated checkout: `/scratch/lovenya/speechaudiolm-paper/`.
 
@@ -6,6 +6,7 @@ Run from `/scratch/lovenya/SALM-model`:
 
 ```bash
 node --check paper_companion/app.js
+node --check scripts/website/build_model_figures.mjs
 node scripts/website/verify_companion.mjs \
   /scratch/lovenya/speechaudiolm-paper
 UV_CACHE_DIR=/tmp/salm-site-uv-cache uv run --no-project --offline \
@@ -38,3 +39,19 @@ light style and content correction on 2026-09-23. Before these changes, the
 user confirmed that deployed examples rendered in Chrome and in Edge after a
 hard reload. Browser layout, audio decoding and keyboard/touch
 behavior need a focused check after the next push.
+
+## Model architecture update
+
+The model page is static and readable without `app.js` or `site-data.js`.
+The DOM check covers three figure images with alt text and intrinsic dimensions,
+plus nine download links. The release validator checks image targets, the
+figure manifest's file sizes and SHA-256 hashes, SVG XML, accessible titles
+and descriptions, and the absence of embedded bitmap images in the SVGs.
+
+The three SVGs were exported using installed `rsvg-convert` 2.56.1 and their
+PNG previews were visually inspected for layout and labels. `pdfinfo` confirms
+one-page PDFs at 174 mm width; `pdffonts` confirms embedded fonts. Renderer
+paths and objectives were checked against source and current saved configs;
+the audit and paper-wording differences are in [FIGURES.md](FIGURES.md).
+No model forward pass, training, installation, data regeneration or score
+update was performed. Full website browser layout remains untested here.

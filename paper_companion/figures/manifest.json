@@ -1,0 +1,73 @@
+{
+  "figures": [
+    {
+      "id": "generation",
+      "title": "Waveform-to-waveform generation",
+      "width": 1280,
+      "height": 670,
+      "files": [
+        {
+          "name": "generation.svg",
+          "bytes": 15440,
+          "sha256": "940bcc3199648454390e2a8da9e0c95e8271ca27c59fba9347c7e3c22256042f"
+        },
+        {
+          "name": "generation.pdf",
+          "bytes": 31767,
+          "sha256": "38ad7057e90994bb75d5e43a89866ec95f52e34f4d176b2b7e7e6738654396ef"
+        },
+        {
+          "name": "generation.png",
+          "bytes": 372362,
+          "sha256": "31b52499d85c45f982f79f1a02c19d9dd833b3b018f629bf78d9c690a8352e3b"
+        }
+      ]
+    },
+    {
+      "id": "training",
+      "title": "Training the diffusion renderers",
+      "width": 1280,
+      "height": 1100,
+      "files": [
+        {
+          "name": "training.svg",
+          "bytes": 20406,
+          "sha256": "a7f287c0b05f8835e40780e7a32d071fc317247bf76c2377d2d10244739b8bfa"
+        },
+        {
+          "name": "training.pdf",
+          "bytes": 33158,
+          "sha256": "b21b9a407dce2140c871b6ec5d65c43d5902bfa01946031267e306d1778d3dfd"
+        },
+        {
+          "name": "training.png",
+          "bytes": 479719,
+          "sha256": "ca05844e4f409830518895de81e43a36387a9499b7f4edc441c5268da160f636"
+        }
+      ]
+    },
+    {
+      "id": "content-lm",
+      "title": "Inside the acoustic content LM",
+      "width": 1280,
+      "height": 1000,
+      "files": [
+        {
+          "name": "content-lm.svg",
+          "bytes": 15113,
+          "sha256": "61378148331e1bf4e17d22e6f87c09ee22be8b226317ad6cb22216c6abf0f4a3"
+        },
+        {
+          "name": "content-lm.pdf",
+          "bytes": 31123,
+          "sha256": "3a145c944bcc37992e1c831332a178472fbb6fe646a0771fee49ee3107d29657"
+        },
+        {
+          "name": "content-lm.png",
+          "bytes": 542077,
+          "sha256": "08241c29c185f4e3c00920864f3803bcf89cafd8a9e6c437d5ef45649dd3b6a6"
+        }
+      ]
+    }
+  ]
+}

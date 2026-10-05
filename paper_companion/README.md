@@ -8,8 +8,10 @@ deliberately empty; publish a built release, not this template.
 
 The site has a paper-title homepage, Dataset, G-Eval Audio, Results, Model, and
 Examples pages. The homepage opens with one paired-reference listening example
-for each direction; both link to their full comparisons. The Model architecture
-content is deferred. The Examples page
+for each direction; both link to their full comparisons. The Model page explains
+both inference paths, renderer training and the acoustic content LM with three
+editable vector figures and SVG/PDF/PNG downloads. It renders without JavaScript
+or the large evaluation-data file. The Examples page
 uses 100 common clean-v2 test IDs, seven recordings per ID, both reference
 texts, dataset pairing rationale, speaker metadata, and a direction switch.
 Direct and cascade systems appear side by side on wide screens. Each generated
@@ -29,6 +31,17 @@ The clean-v2 ground-truth score is a filtered reference point, not independent
 validation of the judge. Objective metrics are on the Results page.
 
 ## Rebuild
+
+The architecture assets are checked in under `figures/` and copied by the
+exporter. Regenerate them after changing their builder:
+
+```bash
+node scripts/website/build_model_figures.mjs
+```
+
+This uses the existing system `rsvg-convert` (no dependency download). PDFs are
+174 mm wide for a two-column paper figure; SVGs retain editable text and shapes.
+See [FIGURES.md](FIGURES.md) for the source audit and intentional simplifications.
 
 The validated website checkout is `/scratch/lovenya/speechaudiolm-paper/`.
 Its source media release is

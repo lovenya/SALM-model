@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="670" viewBox="0 0 1280 670" role="img" aria-labelledby="figure-title figure-desc"><title id="figure-title">Waveform-to-waveform generation</title><desc id="figure-desc">Two separately trained directions. Speech-to-audio uses a frozen Whisper encoder, a learned pooled conditioner, an AudioLDM U-Net, and frozen waveform decoding. Audio-to-speech uses frozen CLAP scene frames both for a global conditioner and an acoustic content LM. Predicted code-duration pairs expand through a frozen centroid codebook; a learned projector supplies frame-aligned channels to the speech diffusion U-Net. Inference uses only the source waveform and random noise.</desc><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#747684"/></marker></defs><style>text{font-family:'DejaVu Sans',sans-serif}</style><rect width="1280" height="670" fill="#fff"/><text x="26" y="31" font-size="24" text-anchor="start" fill="#292936" font-weight="600"><tspan x="26" dy="0">Waveform-to-waveform generation</tspan></text>
+<rect x="618" y="16" width="22" height="18" rx="3" fill="#f1ebf8" stroke="#79559a" stroke-width="1.6"/>
+<text x="649" y="31" font-size="17" text-anchor="start" fill="#333344" font-weight="400"><tspan x="649" dy="0">Learned / fine-tuned</tspan></text>
+<rect x="898" y="16" width="22" height="18" rx="3" fill="#edf5f5" stroke="#527f82" stroke-width="1.6" stroke-dasharray="4 3"/>
+<text x="929" y="31" font-size="17" text-anchor="start" fill="#333344" font-weight="400"><tspan x="929" dy="0">Frozen</tspan></text>
+<rect x="1068" y="16" width="22" height="18" rx="3" fill="#fff" stroke="#93949f" stroke-width="1.6"/>
+<text x="1099" y="31" font-size="17" text-anchor="start" fill="#333344" font-weight="400"><tspan x="1099" dy="0">Fixed operation</tspan></text>
+<text x="26" y="84" font-size="23" text-anchor="start" fill="#79559a" font-weight="700"><tspan x="26" dy="0">(a)</tspan></text>
+<text x="75" y="84" font-size="24" text-anchor="start" fill="#292936" font-weight="600"><tspan x="75" dy="0">Speech → environmental audio</tspan></text>
+<g id="s2a-input" data-kind="data"><title>Input. speech. waveform</title><rect x="26" y="142" width="150" height="90" rx="7" fill="#fff" stroke="#bbc0cc" stroke-width="1.8"/>
+<text x="101" y="168.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="101" dy="0">Input</tspan></text>
+<text x="101" y="194.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="101" dy="0">speech</tspan></text>
+<text x="101" y="219.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="101" dy="0">waveform</tspan></text>
+</g>
+<g id="whisper" data-kind="frozen"><title>Whisper. large-v3 encoder</title><rect x="218" y="142" width="162" height="90" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="299" y="181.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="299" dy="0">Whisper</tspan></text>
+<text x="299" y="206.5" font-size="15.85" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="299" dy="0">large-v3 encoder</tspan></text>
+</g>
+<g id="s2a-conditioner" data-kind="learned"><title>Conditioner. Transformer + pool. global vector g</title><rect x="422" y="142" width="174" height="90" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="509" y="170.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="509" dy="0">Conditioner</tspan></text>
+<text x="509" y="195.5" font-size="15.28" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="509" dy="0">Transformer + pool</tspan></text>
+<text x="509" y="217.5" font-size="15.28" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="509" dy="0">global vector g</tspan></text>
+</g>
+<g id="s2a-unet" data-kind="learned"><title>AudioLDM. U-Net. latent denoising</title><rect x="650" y="142" width="180" height="90" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="740" y="168.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="740" dy="0">AudioLDM</tspan></text>
+<text x="740" y="194.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="740" dy="0">U-Net</tspan></text>
+<text x="740" y="219.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="740" dy="0">latent denoising</tspan></text>
+</g>
+<g id="s2a-decoder" data-kind="frozen"><title>VAE decoder. + vocoder. latent → waveform</title><rect x="874" y="142" width="180" height="90" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="964" y="168.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="964" dy="0">VAE decoder</tspan></text>
+<text x="964" y="194.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="964" dy="0">+ vocoder</tspan></text>
+<text x="964" y="219.5" font-size="16.81" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="964" dy="0">latent → waveform</tspan></text>
+</g>
+<g id="s2a-output" data-kind="data"><title>Generated. audio. environmental</title><rect x="1098" y="142" width="156" height="90" rx="7" fill="#fff" stroke="#bbc0cc" stroke-width="1.8"/>
+<text x="1176" y="168.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1176" dy="0">Generated</tspan></text>
+<text x="1176" y="194.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1176" dy="0">audio</tspan></text>
+<text x="1176" y="219.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="1176" dy="0">environmental</tspan></text>
+</g>
+<path d="M 176 187 L 218 187" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 380 187 L 422 187" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 596 187 L 650 187" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 830 187 L 874 187" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 1054 187 L 1098 187" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="741" y="109" font-size="18" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="741" dy="0">Gaussian noise z_T</tspan></text>
+<path d="M 740 116 L 740 142" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="614" y="176" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="614" dy="0">g</tspan></text>
+<text x="847" y="176" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="847" dy="0">z₀</tspan></text>
+<text x="26" y="269" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="26" dy="0">The source speech is encoded directly; no transcript is generated along this path.</tspan></text>
+<path d="M 26 295 H 1254" stroke="#e4e3e9" stroke-width="1.2"/>
+<text x="26" y="336" font-size="23" text-anchor="start" fill="#79559a" font-weight="700"><tspan x="26" dy="0">(b)</tspan></text>
+<text x="75" y="336" font-size="24" text-anchor="start" fill="#292936" font-weight="600"><tspan x="75" dy="0">Environmental audio → speech</tspan></text>
+<g id="a2s-input" data-kind="data"><title>Input audio. environmental</title><rect x="26" y="430" width="150" height="90" rx="7" fill="#fff" stroke="#bbc0cc" stroke-width="1.8"/>
+<text x="101" y="469.5" font-size="19.08" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="101" dy="0">Input audio</tspan></text>
+<text x="101" y="494.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="101" dy="0">environmental</tspan></text>
+</g>
+<g id="clap-frames" data-kind="frozen"><title>CLAP audio. encoder. scene frames</title><rect x="218" y="430" width="162" height="90" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="299" y="456.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="299" dy="0">CLAP audio</tspan></text>
+<text x="299" y="482.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="299" dy="0">encoder</tspan></text>
+<text x="299" y="507.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="299" dy="0">scene frames</tspan></text>
+</g>
+<g id="a2s-conditioner" data-kind="learned"><title>Scene. conditioner. global vector g</title><rect x="446" y="365" width="180" height="82" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="536" y="387.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="536" dy="0">Scene</tspan></text>
+<text x="536" y="413.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="536" dy="0">conditioner</tspan></text>
+<text x="536" y="438.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="536" dy="0">global vector g</tspan></text>
+</g>
+<g id="content-lm" data-kind="learned"><title>Content LM. flat or hierarchical. codes + durations</title><rect x="446" y="510" width="180" height="88" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="536" y="537.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="536" dy="0">Content LM</tspan></text>
+<text x="536" y="562.5" font-size="14.29" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="536" dy="0">flat or hierarchical</tspan></text>
+<text x="536" y="584.5" font-size="14.29" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="536" dy="0">codes + durations</tspan></text>
+</g>
+<g id="expand-lookup" data-kind="frozen"><title>Expand runs. Codebook lookup. 256 × 512 features</title><rect x="670" y="510" width="180" height="88" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="760" y="535.5" font-size="17.27" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="760" dy="0">Expand runs</tspan></text>
+<text x="760" y="561.5" font-size="17.27" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="760" dy="0">Codebook lookup</tspan></text>
+<text x="760" y="586.5" font-size="15.87" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="760" dy="0">256 × 512 features</tspan></text>
+</g>
+<g id="content-projector" data-kind="learned"><title>Content. projector. 8 extra channels</title><rect x="894" y="510" width="178" height="88" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="983" y="535.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="983" dy="0">Content</tspan></text>
+<text x="983" y="561.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="983" dy="0">projector</tspan></text>
+<text x="983" y="586.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="983" dy="0">8 extra channels</tspan></text>
+</g>
+<g id="a2s-unet" data-kind="learned"><title>AudioLDM. U-Net. latent denoising</title><rect x="894" y="365" width="178" height="82" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="983" y="387.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="983" dy="0">AudioLDM</tspan></text>
+<text x="983" y="413.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="983" dy="0">U-Net</tspan></text>
+<text x="983" y="438.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="983" dy="0">latent denoising</tspan></text>
+</g>
+<g id="a2s-decoder" data-kind="frozen"><title>VAE decoder. + vocoder. </title><rect x="1112" y="365" width="142" height="82" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="1183" y="400" font-size="17.88" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1183" dy="0">VAE decoder</tspan></text>
+<text x="1183" y="426" font-size="17.88" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1183" dy="0">+ vocoder</tspan></text>
+</g>
+<g id="a2s-output" data-kind="data"><title>Generated. speech. </title><rect x="1112" y="550" width="142" height="70" rx="7" fill="#fff" stroke="#bbc0cc" stroke-width="1.8"/>
+<text x="1183" y="579" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1183" dy="0">Generated</tspan></text>
+<text x="1183" y="605" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1183" dy="0">speech</tspan></text>
+</g>
+<path d="M 176 475 L 218 475" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 380 475 L 409 475 L 409 406 L 446 406" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 409 475 L 409 554 L 446 554" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<circle cx="409" cy="475" r="3.2" fill="#747684"/>
+<path d="M 626 406 L 894 406" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="760" y="395" font-size="18" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="760" dy="0">g</tspan></text>
+<path d="M 626 554 L 670 554" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 850 554 L 894 554" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<circle cx="983" cy="476" r="18" fill="#fff" stroke="#747684" stroke-width="1.8"/>
+<text x="983" y="483" font-size="21" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="983" dy="0">C</tspan></text>
+<text x="958" y="464" font-size="17" text-anchor="end" fill="#333344" font-weight="400"><tspan x="958" dy="0">channel concat</tspan></text>
+<path d="M 983 510 L 983 494" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 983 458 L 983 447" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="1063" y="482" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="1063" dy="0">latent z_t</tspan></text>
+<path d="M 1052 476 L 1001 476" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 1072 406 L 1112 406" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="1092" y="395" font-size="18" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="1092" dy="0">z₀</tspan></text>
+<path d="M 1183 447 L 1183 550" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="26" y="647" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="26" dy="0">Acoustic content tokens are not words. Target speech and text are used during training, not at inference.</tspan></text></svg>

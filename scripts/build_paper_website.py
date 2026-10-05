@@ -371,6 +371,7 @@ def build(args: argparse.Namespace) -> None:
     for source in TEMPLATE.iterdir():
         if source.suffix in {".html", ".css", ".js"} and source.name != "site-data.js":
             shutil.copy2(source, out / source.name)
+    shutil.copytree(TEMPLATE / "figures", out / "figures")
     for row in selected:
         item = {key: row[key] for key in ("sample_index", "sample_id", "speaker_gender", "speaker_emotion", "audio_caption", "speech_text")}
         item["reasoning"] = reasons[row["sample_id"]]

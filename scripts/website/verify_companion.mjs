@@ -54,6 +54,17 @@ for(const page of ['index.html','dataset.html','geval.html','results.html','mode
  const rendered=app(page);
  assert.equal(rendered.document.querySelectorAll('[data-site-style]').length,0);
 }
+// The architecture page is readable without loading JavaScript or the evaluation data.
+const modelHtml=fs.readFileSync(path.join(release,'model.html'),'utf8');
+const modelNodes=parse(modelHtml,{});
+assert.equal(modelNodes.filter(n=>n.tag==='script').length,0);
+const modelImages=modelNodes.filter(n=>n.tag==='img');
+assert.equal(modelImages.length,3);
+for(const node of modelImages){
+ assert(node.attrs.alt.length>60&&Number(node.attrs.width)>0&&Number(node.attrs.height)>0);
+ assert(fs.existsSync(path.join(release,node.attrs.src)),node.attrs.src);
+}
+assert.equal(modelNodes.filter(n=>n.tag==='a'&&Object.hasOwn(n.attrs,'download')).length,9);
 const home=app('index.html');
 const previews=home.get('#task-previews').innerHTML;
 assert.equal((previews.match(/class="task-preview"/g)||[]).length,2);
@@ -147,4 +158,4 @@ ui=app('examples.html','',hostile);assert(ui.markup().includes('&lt;img'));asser
 const missing=JSON.parse(JSON.stringify(data));missing.samples[0].judgments={};
 ui=app('examples.html','',missing);assert.equal((ui.markup().match(/class="rating"/g)||[]).length,15);assert(ui.markup().includes('Feedback unavailable'));
 assert(!/\d[\d,]+\s+(?:of|\/)\s+\d[\d,]+/.test(data.benchmarks.a2s.note));
-console.log(JSON.stringify({result:'pass',states,samples:data.samples.length,pages:6,checks:['homepage paired listening examples','G-Eval criterion tables','matched/mismatched controls','ten high/low criterion demos and deep links','shared-ID direction switch','dataset/compare views','caption, transcript and ID search','previous/next','mobile selector','single-audio playback','all media paths','five score tiles per output','feedback and prompt markup','escaping and missing data'],limitation:'DOM stand-in; no browser layout, keyboard or audio decoding test'},null,2));
+console.log(JSON.stringify({result:'pass',states,samples:data.samples.length,pages:6,checks:['static model architecture and nine figure downloads','homepage paired listening examples','G-Eval criterion tables','matched/mismatched controls','ten high/low criterion demos and deep links','shared-ID direction switch','dataset/compare views','caption, transcript and ID search','previous/next','mobile selector','single-audio playback','all media paths','five score tiles per output','feedback and prompt markup','escaping and missing data'],limitation:'DOM stand-in; no browser layout, keyboard or audio decoding test'},null,2));
