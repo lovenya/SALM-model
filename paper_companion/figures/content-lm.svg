@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1000" viewBox="0 0 1280 1000" role="img" aria-labelledby="figure-title figure-desc"><title id="figure-title">Inside the acoustic content LM</title><desc id="figure-desc">Training-only targets come from paired speech encoded by a frozen CTC speech encoder, quantized with a frozen 2048-centroid codebook, and run-length encoded. A six-layer, 512-wide, eight-head causal Transformer decoder cross-attends to projected CLAP scene frames. The input sums previous code, duration and position embeddings. Two heads predict the next code or stop token, and the next duration. Flat sequences predict fine code-duration pairs directly. Hierarchical sequences first predict a strided coarse prefix, then SEP and fine pairs in the same Transformer. Only fine pairs are expanded and rendered. Teacher-forced code cross entropy and fine-duration cross entropy train the content LM independently of the diffusion renderer.</desc><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#747684"/></marker></defs><style>text{font-family:'DejaVu Sans',sans-serif}</style><rect width="1280" height="1000" fill="#fff"/><text x="26" y="31" font-size="24" text-anchor="start" fill="#292936" font-weight="600"><tspan x="26" dy="0">Inside the acoustic content LM</tspan></text>
+<rect x="618" y="16" width="22" height="18" rx="3" fill="#f1ebf8" stroke="#79559a" stroke-width="1.6"/>
+<text x="649" y="31" font-size="17" text-anchor="start" fill="#333344" font-weight="400"><tspan x="649" dy="0">Learned / fine-tuned</tspan></text>
+<rect x="898" y="16" width="22" height="18" rx="3" fill="#edf5f5" stroke="#527f82" stroke-width="1.6" stroke-dasharray="4 3"/>
+<text x="929" y="31" font-size="17" text-anchor="start" fill="#333344" font-weight="400"><tspan x="929" dy="0">Frozen</tspan></text>
+<rect x="1068" y="16" width="22" height="18" rx="3" fill="#fff" stroke="#93949f" stroke-width="1.6"/>
+<text x="1099" y="31" font-size="17" text-anchor="start" fill="#333344" font-weight="400"><tspan x="1099" dy="0">Fixed operation</tspan></text>
+<text x="26" y="84" font-size="23" text-anchor="start" fill="#79559a" font-weight="700"><tspan x="26" dy="0">(a)</tspan></text>
+<text x="75" y="84" font-size="24" text-anchor="start" fill="#292936" font-weight="600"><tspan x="75" dy="0">Prepare training targets from paired speech</tspan></text>
+<g id="target-speech" data-kind="data"><title>Paired speech. mel features</title><rect x="26" y="120" width="172" height="90" rx="7" fill="#fff" stroke="#bbc0cc" stroke-width="1.8"/>
+<text x="112" y="159.5" font-size="18.92" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="112" dy="0">Paired speech</tspan></text>
+<text x="112" y="184.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="112" dy="0">mel features</tspan></text>
+</g>
+<g id="ctc-target-features" data-kind="frozen"><title>CTC encoder. 256 × 512 features. transcript-trained</title><rect x="242" y="120" width="204" height="90" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="344" y="148.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="344" dy="0">CTC encoder</tspan></text>
+<text x="344" y="173.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="344" dy="0">256 × 512 features</tspan></text>
+<text x="344" y="195.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="344" dy="0">transcript-trained</tspan></text>
+</g>
+<g id="quantized-targets" data-kind="frozen"><title>Codebook. quantizer. K = 2,048 centroids</title><rect x="490" y="120" width="210" height="90" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="595" y="146.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="595" dy="0">Codebook</tspan></text>
+<text x="595" y="172.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="595" dy="0">quantizer</tspan></text>
+<text x="595" y="197.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="595" dy="0">K = 2,048 centroids</tspan></text>
+</g>
+<g id="run-length-targets" data-kind="operation"><title>Run-length. encoding. code + duration</title><rect x="744" y="120" width="220" height="90" rx="7" fill="#fff" stroke="#93949f" stroke-width="1.8"/>
+<text x="854" y="146.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="854" dy="0">Run-length</tspan></text>
+<text x="854" y="172.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="854" dy="0">encoding</tspan></text>
+<text x="854" y="197.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="854" dy="0">code + duration</tspan></text>
+</g>
+<g id="lm-targets" data-kind="data"><title>Training targets. next code / stop token. fine duration</title><rect x="1008" y="120" width="246" height="90" rx="7" fill="#fff" stroke="#bbc0cc" stroke-width="1.8"/>
+<text x="1131" y="148.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1131" dy="0">Training targets</tspan></text>
+<text x="1131" y="173.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="1131" dy="0">next code / stop token</tspan></text>
+<text x="1131" y="195.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="1131" dy="0">fine duration</tspan></text>
+</g>
+<path d="M 198 165 L 242 165" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<path d="M 446 165 L 490 165" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<path d="M 700 165 L 744 165" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<path d="M 964 165 L 1008 165" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<text x="26" y="245" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="26" dy="0">Dashed arrows: target preparation only. Fit CTC with transcripts and the codebook with k-means, then freeze both.</tspan></text>
+<path d="M 26 268 H 1254" stroke="#e4e3e9" stroke-width="1.2"/>
+<text x="26" y="310" font-size="23" text-anchor="start" fill="#79559a" font-weight="700"><tspan x="26" dy="0">(b)</tspan></text>
+<text x="75" y="310" font-size="24" text-anchor="start" fill="#292936" font-weight="600"><tspan x="75" dy="0">One shared Transformer, two prediction heads</tspan></text>
+<g id="scene-memory" data-kind="data"><title>CLAP frames. source audio</title><rect x="26" y="348" width="190" height="74" rx="7" fill="#fff" stroke="#bbc0cc" stroke-width="1.8"/>
+<text x="121" y="379.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="121" dy="0">CLAP frames</tspan></text>
+<text x="121" y="404.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="121" dy="0">source audio</tspan></text>
+</g>
+<g id="ambient-projection" data-kind="learned"><title>Linear projection. + scene positions</title><rect x="250" y="348" width="196" height="74" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="348" y="379.5" font-size="16.78" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="348" dy="0">Linear projection</tspan></text>
+<text x="348" y="404.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="348" dy="0">+ scene positions</tspan></text>
+</g>
+<g id="previous-pair" data-kind="data"><title>Previous tokens. code + duration</title><rect x="26" y="484" width="190" height="86" rx="7" fill="#fff" stroke="#bbc0cc" stroke-width="1.8"/>
+<text x="121" y="521.5" font-size="18.36" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="121" dy="0">Previous tokens</tspan></text>
+<text x="121" y="546.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="121" dy="0">code + duration</tspan></text>
+</g>
+<g id="input-embeddings" data-kind="learned"><title>Embed inputs. code + duration. + token position</title><rect x="250" y="484" width="196" height="86" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="348" y="510.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="348" dy="0">Embed inputs</tspan></text>
+<text x="348" y="535.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="348" dy="0">code + duration</tspan></text>
+<text x="348" y="557.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="348" dy="0">+ token position</tspan></text>
+</g>
+<g id="decoder-stack" data-kind="learned"><rect x="506" y="448" width="354" height="178" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="683" y="478" font-size="21" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="683" dy="0">Causal Transformer × 6</tspan></text>
+<text x="683" y="516" font-size="20" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="683" dy="0">Masked self-attention</tspan></text>
+<text x="683" y="552" font-size="19" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="683" dy="0">Cross-attention to scene frames</tspan></text>
+<text x="683" y="588" font-size="20" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="683" dy="0">Feed-forward</tspan></text>
+</g>
+<text x="683" y="646" font-size="18" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="683" dy="0">width 512 · 8 heads · final LayerNorm</tspan></text>
+<g id="code-head" data-kind="learned"><title>Code head. ID / EOS (+ SEP in hier.)</title><rect x="950" y="448" width="304" height="80" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="1102" y="482.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1102" dy="0">Code head</tspan></text>
+<text x="1102" y="507.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="1102" dy="0">ID / EOS (+ SEP in hier.)</tspan></text>
+</g>
+<g id="duration-head" data-kind="learned"><title>Duration head. next fine duration: 1–32</title><rect x="950" y="552" width="304" height="80" rx="7" fill="#f1ebf8" stroke="#79559a" stroke-width="1.8"/>
+<text x="1102" y="586.5" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1102" dy="0">Duration head</tspan></text>
+<text x="1102" y="611.5" font-size="17.00" text-anchor="middle" fill="#575867" font-weight="400"><tspan x="1102" dy="0">next fine duration: 1–32</tspan></text>
+</g>
+<path d="M 216 385 L 250 385" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 446 385 L 683 385 L 683 448" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="683" y="373" font-size="18" text-anchor="middle" fill="#333344" font-weight="400"><tspan x="683" dy="0">scene memory</tspan></text>
+<path d="M 216 527 L 250 527" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 446 527 L 506 527" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 860 537 L 902 537 L 902 488 L 950 488" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 902 537 L 902 592 L 950 592" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<circle cx="902" cy="537" r="3.2" fill="#747684"/>
+<text x="26" y="611" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="26" dy="0">Teacher forcing: use previous target pairs.</tspan></text>
+<text x="26" y="640" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="26" dy="0">Inference: append predictions and repeat.</tspan></text>
+<text x="26" y="686" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="26" dy="0">Training loss: code cross-entropy + fine-duration cross-entropy. The renderer is not optimized in this stage.</tspan></text>
+<path d="M 26 710 H 1254" stroke="#e4e3e9" stroke-width="1.2"/>
+<text x="26" y="752" font-size="23" text-anchor="start" fill="#79559a" font-weight="700"><tspan x="26" dy="0">(c)</tspan></text>
+<text x="75" y="752" font-size="24" text-anchor="start" fill="#292936" font-weight="600"><tspan x="75" dy="0">Flat and hierarchical: different sequences, the same mechanism</tspan></text>
+<text x="26" y="805" font-size="21" text-anchor="start" fill="#79559a" font-weight="600"><tspan x="26" dy="0">Flat</tspan></text>
+<text x="235" y="805" font-size="23" text-anchor="start" fill="#333344" font-weight="400"><tspan x="235" dy="0">BOS → (c₁, d₁) → (c₂, d₂) → … → EOS</tspan></text>
+<text x="26" y="858" font-size="21" text-anchor="start" fill="#79559a" font-weight="600"><tspan x="26" dy="0">Hierarchical</tspan></text>
+<text x="235" y="858" font-size="22" text-anchor="start" fill="#333344" font-weight="400"><tspan x="235" dy="0">BOS → c₁ → c₁₃ → … → SEP → (c₁, d₁) → (c₂, d₂) → … → EOS</tspan></text>
+<text x="235" y="891" font-size="18" text-anchor="start" fill="#333344" font-weight="400"><tspan x="235" dy="0">Coarse prefix: every 12th fine token; no durations. Only the fine pairs are rendered.</tspan></text>
+<g id="duration-expansion" data-kind="operation"><title>Expand fine durations. </title><rect x="26" y="927" width="358" height="54" rx="7" fill="#fff" stroke="#93949f" stroke-width="1.8"/>
+<text x="205" y="961" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="205" dy="0">Expand fine durations</tspan></text>
+</g>
+<g id="centroid-lookup" data-kind="frozen"><title>Frozen centroid lookup. </title><rect x="461" y="927" width="358" height="54" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="640" y="961" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="640" dy="0">Frozen centroid lookup</tspan></text>
+</g>
+<g id="speech-renderer" data-kind="frozen"><title>Speech diffusion renderer. </title><rect x="896" y="927" width="358" height="54" rx="7" fill="#edf5f5" stroke="#527f82" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="1075" y="961" font-size="21.00" text-anchor="middle" fill="#292936" font-weight="600"><tspan x="1075" dy="0">Speech diffusion renderer</tspan></text>
+</g>
+<path d="M 384 954 L 461 954" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M 819 954 L 896 954" fill="none" stroke="#747684" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/></svg>

@@ -20,3 +20,11 @@ wandb/
 # landed. Read one before trusting that ignoring it is safe.
 *.orig
 *.rej
+
+# Local research material and cluster tooling excluded from the public repository.
+/*claude*chat*.txt
+/.claude/skills/
+/tests/
+/submission_scripts/
+/docs/
+/legacy/
